@@ -15,33 +15,44 @@ Every ML system, however bespoke, decomposes into the same six layers. What chan
 ```mermaid
 flowchart TB
     subgraph D["Data & Feature Layer"]
-        D1[Ingestion & storage] --> D2[Validation & quality gates]
-        D2 --> D3[Feature computation]
-        D3 --> D4[Feature store]
+        D1["Ingestion & storage"] -->|"seam: data"| D2["Validation & quality gates"]
+        D2 --> D3["Feature computation"]
+        D3 --> D4["Feature store"]
     end
     subgraph M["Modeling Layer"]
-        M1[Experimentation] --> M2[Training]
-        M2 --> M3[Model registry]
+        M1["Experimentation"] --> M2["Training"]
+        M2 -->|"seam: model"| M3["Model registry"]
     end
     subgraph V["Verification Layer"]
-        V1[Offline evaluation] --> V2[Online evaluation / A-B]
-        V2 --> V3[Approval gate]
+        V1["Offline evaluation"] --> V2["Online evaluation / A-B"]
+        V2 --> V3["Approval gate"]
     end
     subgraph S["Serving Layer"]
-        S1[Serving system] --> S2[Deployment & CI-CD]
+        S2["Deployment & CI-CD"] -->|"deploys"| S1["Serving system<br/>(live inference)"]
     end
     subgraph O["Operational Layer"]
-        O1[Monitoring] --> O2[Drift & retraining]
-        O2 --> O3[Governance]
+        O1["Monitoring"] --> O2["Drift & retraining"]
+        O2 --> O3["Governance"]
     end
-    D4 --> M1
-    D4 --> S1
+    D4 -->|"seam: feature (training)"| M1
+    D4 -->|"seam: feature (serving)"| S1
     M3 --> V1
-    V3 --> S1
-    S2 --> O1
-    O2 -->|retrain| M2
-    O1 -->|drift signal| D1
+    V3 -->|"seam: model (release)"| S2
+    O1 -.->|"observes"| S1
+    O1 -.->|"observes for drift"| D4
+    O2 -.->|"triggers retrain"| M2
 ```
+
+Two kinds of arrows, and the difference is the point of this module. 
+- **Solid arrows are flow seams** — an artifact crosses a boundary under a contract: data enters the system, features flow to training and serving, the model flows from the registry through the gate into deployment. 
+- **Dotted arrows are cross-cutting relationships** — monitoring *observes*, drift *triggers* retraining; they carry signals and controls, not artifacts.
+
+And note where **live inference** happens: the **Serving system** box (S1). 
+- Two things arrive there and meet 
+    — **features** (via the feature seam, from the feature store) and 
+    - a **model** (via the release path, from CI/CD). 
+- Read the arrow direction carefully: it's **CI/CD → serving**, not serving → CI/CD. 
+    - The deployment pipeline *puts the model into* serving; the Serving system is the box that actually runs the live prediction.
 
 Each layer has a **single responsibility** and a **defined interface** to its neighbors. That's not bureaucracy — it's what makes failures *locatable*. When something breaks, you want to know *which* layer broke and *at which seam*, not "the ML is down."
 
@@ -54,10 +65,13 @@ Why seams matter so much here, specifically:
 1. **ML systems change faster than normal systems.** Data changes, features change, models change, the world changes. Seams are where you *absorb* change without it silently propagating.
 2. **Silent absorption is the enemy.** From M2: cascading failure happens when an upstream change flows downstream *unannounced*. A seam with a contract turns that silent flow into a *detected* event.
 
-The two seams that matter most in practice:
+The three seams that matter most in practice — the three labeled in the diagram:
 
-- **The feature seam** — between feature computation and both training and serving. The contract: "features `x1..xn` are computed by *this* code, on *this* data, in *this* schema." Training and serving both consume *the same contract*. Break it, and you get training–serving skew (M6).
 - **The data seam** — between ingestion and everything else. The contract: "this schema, these invariants, this freshness guarantee." Break it, and you get silent data corruption (M5).
+- **The feature seam** — between feature computation and both training and serving. The contract: "features `x1..xn` are computed by *this* code, on *this* data, in *this* schema." Training and serving both consume *the same contract*. Break it, and you get training–serving skew (M6).
+- **The model seam** — between the registry and everything that consumes the model (evaluation, deployment, serving). The contract: "a model is a versioned artifact with lineage; nothing is deployed that isn't registered." Break it, and you lose the answer to "what's in prod?" (M9, M13).
+
+A seam is where an **artifact** crosses a boundary under a contract. That's what separates it from the **dotted arrows** — the cross-cutting relationships like *drift signal* and *retrain*. Those carry signals and controls (notifications, triggers), not artifacts, and are **not seams**: a drift signal has no shape contract that training and serving must both honor — it's observability saying "look here." Conflating the two — treating every arrow as a seam — is how the word loses its meaning.
 
 > **⚠️ Failure mode** — *The seamless monolith.* A system where data flows from source to model with no explicit contracts works fine until it doesn't — and then the failure has no single location, because every layer silently assumed the one above it was right. The fix isn't more code; it's *seams with contracts*.
 
@@ -102,10 +116,10 @@ A course is only concrete if it picks tools. We pick a **fixed, vendor-neutral P
 | Serving | FastAPI + Docker | Online endpoints, containers |
 | Serialization | ONNX, TorchScript | Portable model artifacts |
 | Observability | Prometheus + Grafana | Metrics, dashboards, alerting |
-| Drift detection | Evidently AI (conceptual) | Data/concept drift, PSI |
-| Orchestration | Kubeflow, TFX, Airflow (conceptual) | Pipelines, scheduling |
+| Drift detection | alibi-detect | Data/concept drift, PSI — code in Pass 2 |
+| Orchestration | Prefect | Pipelines, scheduling — code in Pass 2 |
 
-A note on depth: we reference these at the **API level** — enough to make a concept concrete, not enough to run a production platform. Labs are deferred; the point of the stack is to make every idea *runnable in your head*.
+A note on depth: we reference these at the **API level** — enough to make a concept concrete, not enough to run a production platform. Labs are deferred; the point of the stack is to make every idea *runnable in your head*. Two rows are staged for Pass 2 — **Prefect** (orchestration) and **alibi-detect** (drift detection) — flagged with `💻 CODE (Pass 2)` blockquotes below; the code arrives in the second pass, and the design doesn't depend on it. The orchestration modules (M13, M16) also cover the platform alternatives — **Airflow, Kubeflow Pipelines, TFX** — whose specs/requirements live in the tech shelf ([`tech/`](../../tech/)), with the no-infra restriction lifted for those modules.
 
 ### Why this stack
 
@@ -113,8 +127,14 @@ A note on depth: we reference these at the **API level** — enough to make a co
 - **Pandera / Great Expectations** make validation a *contract you can execute*, not a hope (M5).
 - **MLflow** is the de-facto standard for tracking and registry, and it's cloud-agnostic (M7, M9).
 - **FastAPI + Docker** are the workhorses of online serving and are trivial to reason about (M12, M13).
-- **Prometheus + Grafana** are the standard for metrics/alerting and are not ML-specific — which is the point: ML monitoring should plug into the *same* observability the rest of your org uses (M15).
+- **Prometheus + Grafana** are the standard for metrics/alerting and are not ML-specific — which is the point: ML monitoring should plug into the *same* observability the rest of your org already runs, not a parallel island (M15).
 - **ONNX/TorchScript** make a model portable between training and serving runtimes — the serialization half of the feature seam (M12).
+- **Prefect** makes orchestration a *few decorators of Python*, not a platform: flows, tasks, retries, and schedules are concepts you can see in ten lines — and it runs locally with zero infrastructure (M13, M16).
+- **alibi-detect** packages drift detection (KS, chi-squared, MMD) behind a fit-on-reference / predict-on-new-data API — the M16 concept, in library form.
+
+> **💻 CODE (Pass 2) · Prefect** — *orchestration, made concrete.* The working demo is M13's promotion pipeline (`modules/13-deployment-cicd/code/promotion_dag.py`) plus the retraining variant in M16. Specs live in those modules' blockquotes; base reference: [`tech/prefect.md`](../../tech/prefect.md).
+
+> **💻 CODE (Pass 2) · alibi-detect** — *drift detection, made concrete.* The working demo is M16's detector (`modules/16-drift-retraining/code/drift_detector.py`) plus M15's alerting wiring. Specs live in those modules' blockquotes; base reference: [`tech/alibi-detect.md`](../../tech/alibi-detect.md).
 
 > **🐍 Reference stack at a glance** — The one tool that matters *right now* is **MLflow**: from M7 onward, every experiment we discuss is tracked, every model is registered, and "which model is in prod?" always has an answer. If you internalize one tool this course, make it MLflow.
 
@@ -133,7 +153,7 @@ concepts real, but must transfer to any production environment.
 Use scikit-learn + PyTorch for modeling, Pandera/Great Expectations
 for validation, MLflow for tracking/registry, FastAPI + Docker for
 serving, ONNX/TorchScript for serialization, Prometheus/Grafana for
-observability, and treat Kubeflow/TFX/Airflow as conceptual.
+observability, Prefect for orchestration, and alibi-detect for drift detection.
 
 ## Alternatives considered
 - Single-cloud stack (e.g., all-AWS SageMaker) — simpler but vendor-locks the concepts
@@ -141,7 +161,7 @@ observability, and treat Kubeflow/TFX/Airflow as conceptual.
 
 ## Consequences
 - Good: transferable, industry-standard, every concept has a concrete surface
-- Bad: not an optimized "one-click" platform; some tools stay conceptual
+- Bad: not an optimized "one-click" platform; orchestration and drift-detection code arrives in Pass 2
 ```
 
 That's the template. You'll write your own before long.
