@@ -6,13 +6,25 @@
 
 ## The transaction feed that changed silently
 
-You're on the fraud team at a fintech. Your model has been stable for months. Then, over a few weeks, precision quietly decays — the same slide you now recognize from M2's silent degradation. You start digging and find the culprit buried in the ingestion layer: the upstream card network changed its transaction feed. The `merchant_category` field, which used to be a four-digit code, now sometimes arrives as a *string description* ("RESTAURANT" instead of "5812"). The `amount` field occasionally comes through as `null` for declined transactions. Nobody was told, nothing crashed — the pipeline just absorbed the changes and kept feeding the model garbage.
+You're on the fraud team at a fintech. Your model has been stable for months. 
+- Then, over a few weeks, precision quietly decays — the same slide you now recognize from M2's silent degradation. 
+- You start digging and find the culprit buried in the ingestion layer: the upstream card network changed its transaction feed. 
+- The `merchant_category` field, which used to be a four-digit code, now sometimes arrives as a *string description* ("RESTAURANT" instead of "5812"). 
+- The `amount` field occasionally comes through as `null` for declined transactions. 
+- Nobody was told, nothing crashed — the pipeline just absorbed the changes and kept feeding the model garbage.
 
-The model didn't fail. The model was **poisoned by its data**, and the data layer had no gate that could have caught it. M4 taught you where data comes from and how to keep it temporally honest. This module is about the next line of defense: **validation** — making the data's *contract* explicit, and enforcing it automatically, before a single bad row reaches a model.
+The model didn't fail. The model was **poisoned by its data**, and the data layer had no gate that could have caught it. 
+- M4 taught you where data comes from and how to keep it temporally honest. 
+- This module is about the next line of defense: **validation** — making the data's *contract* explicit, and enforcing it automatically, before a single bad row reaches a model.
 
 ## Data has a contract, whether you write it down or not
 
-Every dataset has an implicit contract — assumptions about its shape and meaning that the model silently relies on. `amount` is a non-negative float. `merchant_category` is a four-digit code. `transaction_id` is unique. `event_ts` is monotonic. The model doesn't *know* these assumptions; it just behaves correctly only while they hold.
+Every dataset has an implicit contract — assumptions about its shape and meaning that the model silently relies on. 
+- `amount` is a non-negative float. 
+- `merchant_category` is a four-digit code. 
+- `transaction_id` is unique. 
+- `event_ts` is monotonic. 
+- The model doesn't *know* these assumptions; it just behaves correctly only while they hold.
 
 The moment those assumptions break, the model is wrong — but it's wrong *quietly*, because nothing checks. **Validation is the act of writing the contract down and enforcing it mechanically.** It turns "the data probably looks like this" into "the data is *verified* to look like this, or the pipeline stops."
 
@@ -42,6 +54,8 @@ Three things about that snippet carry the whole discipline:
 1. **It fails loudly.** `strict=True` rejects unknown columns; `coerce=False` refuses to silently cast `"RESTAURANT"` into something numeric. A validation failure *raises*, it doesn't warn. That's the point: silent is how poison spreads.
 2. **It's a contract, not a test suite.** The schema lives *with* the pipeline as a named, versioned artifact — the M3 "data seam" made concrete. Upstream teams can see it, and changes to it are changes to the contract.
 3. **It runs everywhere.** The same schema checks training data and serving data. Validation at the door (M5) and continuous monitoring (M15's pillar 2) are the same contract, enforced at two different times.
+
+**Note:** Read more about this [`pa.Field`](https://pandera.readthedocs.io/en/stable/reference/generated/pandera.api.dataframe.model_components.Field.html#pandera.api.dataframe.model_components.Field) here in order to know all possible checking criteria.
 
 > **🐍 Reference stack at a glance** — **Pandera** (dataframe-native, decorators/`DataFrameModel` as above) and **Great Expectations** (expectation suites + data-docs reporting) are the two workhorses. Pandera integrates cleanly with pandas/polars and runs in-process; Great Expectations is heavier but produces human-readable data-quality reports and profiling. Pick one and enforce it everywhere; the *discipline* of a shared schema contract matters more than the library.
 
