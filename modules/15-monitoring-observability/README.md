@@ -81,7 +81,15 @@ Here's the hard truth of this pillar: **you can't measure a model's accuracy wit
 
 The pillar that ties the model to money. For fraud: how much fraud value was blocked, how many legitimate customers were refused, what did false positives cost in support calls and churn? Business impact is the *only* pillar that can tell you whether the model's decisions are still worth making. A model can be statistically fine and commercially pointless — or statistically degraded and commercially fine — and only pillar 4 knows the difference.
 
-> **🐍 Reference stack at a glance** — The ML-agnostic core is **Prometheus + Grafana**: your service emits counters/gauges/histograms (latency percentiles, prediction volume, error rates, score distribution), Grafana renders the four pillars as dashboards, and Prometheus Alertmanager fires on thresholds and burn rates. For the ML-specific pillars, **Evidently AI** computes data-drift and target-drift metrics (PSI, KL) and **MLflow** tells you *which model version* was live when it happened. The design principle from M3: ML monitoring should plug into the *same* observability stack the rest of your org already runs, not a parallel island.
+> **🐍 Reference stack at a glance** — The ML-agnostic core is **Prometheus + Grafana**: your service emits counters/gauges/histograms (latency percentiles, prediction volume, error rates, score distribution), Grafana renders the four pillars as dashboards, and Prometheus Alertmanager fires on thresholds and burn rates. For the ML-specific pillars, **alibi-detect** provides statistical drift detectors (KS, chi-squared, MMD) with p-values and thresholds, and **MLflow** tells you *which model version* was live when it happened. The design principle from M3: ML monitoring should plug into the *same* observability stack the rest of your org already runs, not a parallel island.
+
+> **💻 CODE (Pass 2) · alibi-detect** — *drift into the monitoring loop.*
+> - **Demonstrates:** the "drift p-value becomes a page" arc — detector output wired to this module's pillar-2 dashboards and alerting.
+> - **Where:** `modules/15-monitoring-observability/code/drift_alerting.py`
+> - **Requirements:** `alibi-detect==0.11.*`, Prometheus client; builds on M16's `drift_detector.py`.
+> - **Reader should see:** a per-feature PSI/p-value gauge set in Prometheus and an alert firing when a threshold (e.g., PSI > 0.25) is crossed.
+> - **Accept:** `drift_alerting.py` runs against a shifted stream; the gauge moves and the alert fires.
+> - **Base:** [`tech/alibi-detect.md`](../../tech/alibi-detect.md)
 
 ## Tracing a prediction
 

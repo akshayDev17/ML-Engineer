@@ -62,7 +62,47 @@ The tools, side by side, so you reach for the right one:
 
 The pattern to internalize: the label-free methods are *fast tripwires*; the label-dependent method is the *verdict*. A PSI spike tells you *look here*; a rolling-precision drop tells you *the model is actually wrong now*. Only the second one justifies a retrain.
 
-> **🐍 Reference stack at a glance** — **Evidently AI** computes PSI, KL, and categorical drift out of the box over your reference vs. current data and renders a per-feature drift report; it's the M3 "drift detection" row made concrete. Wire the resulting scores into **Prometheus** as gauges (one per critical feature), alert in **Grafana** on the 0.25 PSI threshold, and let **MLflow** tell you *which model version* was live when drift started so the retrain has a target. Airflow (conceptual) is what schedules the drift jobs and the retrain.
+> **🐍 Reference stack at a glance** — **alibi-detect** provides the drift detectors (KS, chi-squared, MMD) over your reference vs. current data, returning p-values and thresholds per feature; it's the M3 "drift detection" row made concrete. Wire the resulting scores into **Prometheus** as gauges (one per critical feature), alert in **Grafana** on the 0.25 PSI threshold, and let **MLflow** tell you *which model version* was live when drift started so the retrain has a target. **Prefect** schedules the drift jobs and the retrain.
+
+> **💻 CODE (Pass 2) · alibi-detect** — *the drift detector.*
+> - **Demonstrates:** this module's drift detection as a library — per-feature p-values/thresholds on a rolling window, the library form of the inline PSI above.
+> - **Where:** `modules/16-drift-retraining/code/drift_detector.py`
+> - **Requirements:** `alibi-detect==0.11.*`, numpy. See [`tech/alibi-detect.md`](../../tech/alibi-detect.md).
+> - **Reader should see:** `is_drift` flipping true when the synthetic stream shifts, and *which feature* drifted.
+> - **Accept:** detector fit on the reference, `predict` on shifted data returns `is_drift=True` with correct feature attribution.
+> - **Base:** [`tech/alibi-detect.md`](../../tech/alibi-detect.md)
+
+> **💻 CODE (Pass 2) · Prefect** — *the retraining policy (no-infra path).*
+> - **Demonstrates:** the retraining policy as a scheduled flow — drift-check gating retrain, gating evaluation, gating promotion; the threshold + floor cadence from "Retraining triggers & continuous training".
+> - **Where:** `modules/16-drift-retraining/code/retraining_dag.py`
+> - **Requirements:** Prefect 3.x, mlflow; runs locally, `.serve(cron=…)` for the schedule.
+> - **Reader should see:** a run where drift is detected → retrain runs → evaluation fails the gate → no promotion.
+> - **Accept:** `flow()` demonstrates both the pass and the fail paths.
+> - **Base:** [`tech/prefect.md`](../../tech/prefect.md)
+
+> **💻 CODE (Pass 2) · Airflow** — *retraining loop (infra path).*
+> - **Demonstrates:** the retraining loop as an Airflow DAG, scheduled — drift task gating retrain/eval/promote tasks.
+> - **Where:** `modules/16-drift-retraining/code/retraining_dag_airflow.py`
+> - **Requirements:** Airflow 2.10+ + docker-compose (as in M13). See [`tech/airflow.md`](../../tech/airflow.md).
+> - **Reader should see:** a scheduled daily run where the drift task branches to retrain or skip.
+> - **Accept:** `airflow dags trigger retraining` shows the branch taking the correct path on drifted vs. stable data.
+> - **Base:** [`tech/airflow.md`](../../tech/airflow.md)
+
+> **💻 CODE (Pass 2) · Kubeflow Pipelines** — *retraining loop (K8s path).*
+> - **Demonstrates:** the retraining loop as KFP components — drift check, retrain, eval, promote as isolated pods.
+> - **Where:** `modules/16-drift-retraining/code/retraining_pipeline_kfp.py`
+> - **Requirements:** KFP 2.x on a k3s/minikube cluster + registry (as in M13). See [`tech/kubeflow-pipelines.md`](../../tech/kubeflow-pipelines.md).
+> - **Reader should see:** a run where the drift component's output decides whether retrain/promote components execute.
+> - **Accept:** run completes with the expected component graph for the drifted case.
+> - **Base:** [`tech/kubeflow-pipelines.md`](../../tech/kubeflow-pipelines.md)
+
+> **💻 CODE (Pass 2) · TFX** — *retraining loop as a TFX pipeline.*
+> - **Demonstrates:** retraining via fresh examples flowing through the component graph — the "data-triggered" retrain from this module.
+> - **Where:** `modules/16-drift-retraining/code/retraining_pipeline_tfx.py`
+> - **Requirements:** `tfx==1.*`, TF, LocalDagRunner + SQLite metadata (as in M13). See [`tech/tfx.md`](../../tech/tfx.md).
+> - **Reader should see:** new examples arriving → Trainer re-runs → Evaluator gates the new model.
+> - **Accept:** adding a fresh example slice triggers a new Trainer run that passes/fails the gate as configured.
+> - **Base:** [`tech/tfx.md`](../../tech/tfx.md)
 
 ## Feedback loops: when predictions change the data
 

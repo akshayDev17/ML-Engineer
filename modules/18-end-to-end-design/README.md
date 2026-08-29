@@ -139,7 +139,7 @@ Two things to notice about this diagram, because they're the *point*:
 1. **The online and training paths share the feature store** — that single shared contract is what prevents training–serving skew. It's the most important seam in the system.
 2. **The operations loop is wired in from the start** — monitoring feeds retraining and rollback. It's not a box someone adds later; it's load-bearing.
 
-> **🐍 Reference stack at a glance** — the whole course, composed into one system: **Pandas + Pandera** (data + validation), a **feature store** (features, one code path), **MLflow** (registry + lineage), **FastAPI + Docker + ONNX** (serving), **Prometheus + Grafana + Evidently** (monitoring + drift). M18 introduces no new tools — it's where the stack stops being six modules and becomes *one system*.
+> **🐍 Reference stack at a glance** — the whole course, composed into one system: **Pandas + Pandera** (data + validation), a **feature store** (features, one code path), **MLflow** (registry + lineage), **FastAPI + Docker + ONNX** (serving), **Prometheus + Grafana + alibi-detect** (monitoring + drift), **Prefect** (orchestration). M18 introduces no new tools — it's where the stack stops being six modules and becomes *one system*.
 
 ## Tradeoff tension points, made explicit
 

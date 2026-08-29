@@ -33,7 +33,7 @@ flowchart LR
     A["Rung 1: Laptop / single CPU<br/>pandas + sklearn<br/>minutes"] --> B["Rung 2: Big-memory single node<br/>dask / polars, many-core<br/>tens of minutes"]
     B --> C["Rung 3: Single GPU<br/>PyTorch<br/>minutes–hours"]
     C --> D["Rung 4: Multi-GPU / distributed<br/>PyTorch DDP, Ray, Spark<br/>hours–days"]
-    D -.->|"only when the job genuinely won't fit"| E["Rung 5: Cluster / job scheduler<br/>Kubeflow, Airflow (conceptual)"]
+    D -.->|"only when the job genuinely won't fit"| E["Rung 5: Cluster / job scheduler<br/>Prefect, Kubeflow, Airflow"]
 ```
 
 The rule of thumb that prevents most infra over-engineering: **stay on the lowest rung that finishes the job in a tolerable time.** A gradient-boosted tree on 2M rows trains on a laptop in minutes — buying it a GPU cluster is not "scaling up," it's setting money on fire. Distributed training exists for one reason: *the job doesn't fit* — the data is too large, the model too big, or the wall-clock too tight. If none of those is true, you're paying complexity cost for nothing.

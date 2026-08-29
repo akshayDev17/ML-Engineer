@@ -154,7 +154,7 @@ We'll use a fixed, vendor-neutral Python stack throughout — the same idea as t
 | Serving | FastAPI + Docker | Online endpoints, containers |
 | Serialization | ONNX, TorchScript | Portable model artifacts |
 | Observability | Prometheus, Grafana | Metrics, dashboards, alerts |
-| Orchestration | Kubeflow, TFX, Airflow | Pipelines (conceptual) |
+| Orchestration | Prefect | Pipelines, scheduling |
 
 It's deliberately **cloud-agnostic**: no "everything runs on AWS/GCP/Azure" assumption, so the concepts transfer. Where a tool is referenced, it's at the API level — enough to make the concept concrete, not enough to build a lab (labs are deferred).
 

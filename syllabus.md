@@ -3,7 +3,7 @@
 **Course title:** ML Engineering Design: Designing the Systems Around Machine-Learned Models \
 **Audience:** Working professional, self-study (~4–6 years experience; comfortable in Python, has trained models in notebooks, has *not* designed or operated a production ML system) \
 **Format:** Rich written Markdown lessons — broad, deep, vivid. No time constraint. No lab infrastructure for now (inline Python examples yes, full coded demos deferred to Pass 2). Design exercises end every module. \
-**Reference stack:** Vendor-neutral Python — scikit-learn + PyTorch (modeling), Pandera / Great Expectations (data validation), MLflow (tracking & registry), FastAPI + Docker (serving), Prometheus + Grafana (observability), Kubeflow/TFX/Airflow (orchestration, conceptual). No single-cloud assumption. \
+**Reference stack:** Vendor-neutral Python — scikit-learn + PyTorch (modeling), Pandera / Great Expectations (data validation), MLflow (tracking & registry), FastAPI + Docker (serving), Prometheus + Grafana (observability), Prefect (orchestration), alibi-detect (drift detection). No single-cloud assumption. Orchestration and drift-detection code arrives in Pass 2. \
 **Out of scope:** ML theory/math (assumes basic ML literacy), novel model research, general software-engineering basics, pure data/platform infrastructure beyond what ML systems need, frontend/product design.
 
 ---
@@ -229,11 +229,16 @@ By the end of this course, the learner will be able to:
 ML-Engineer/
 ├── syllabus.md              ← this blueprint (the map)
 ├── README.md                ← course landing page
-└── modules/
-    ├── 01-what-is-an-ml-system/README.md
-    ├── 02-ml-failure-science/README.md
-    ├── ... (one folder per module)
-    └── 18-end-to-end-design/README.md
+├── modules/
+│   ├── 01-what-is-an-ml-system/README.md
+│   ├── ... (one folder per module; each may carry a code/ dir for its Pass-2 demos)
+│   └── 18-end-to-end-design/README.md
+└── tech/                    ← reference shelf: specs/requirements/setup per tool
+    ├── airflow.md
+    ├── kubeflow-pipelines.md
+    ├── tfx.md
+    ├── prefect.md
+    └── alibi-detect.md
 ```
 
 Each module is a single rich `README.md` (or split into chapters if it outgrows one file).
@@ -250,16 +255,17 @@ Each module is a single rich `README.md` (or split into chapters if it outgrows 
 - [Breck et al. — Data Validation for Machine Learning (MLSys 2019)](https://mlsys.org/Conferences/2019/doc/2019/167.pdf)
 - [Ameisen — Building Machine Learning Powered Applications](https://www.oreilly.com/library/view/building-machine-learning/9781492045106/)
 - [Chip Huyen — blog (MLOps, real-time ML, evaluation)](https://huyenchip.com/blog/)
-- Official docs of the reference stack: scikit-learn, PyTorch, MLflow, FastAPI, Pandera, Great Expectations, Prometheus, Grafana, Evidently AI (drift)
+- Official docs of the reference stack: scikit-learn, PyTorch, MLflow, FastAPI, Pandera, Great Expectations, Prometheus, Grafana, alibi-detect (drift), Prefect (orchestration)
 
 ---
 
 ## 7. Decisions so far
 
-- **Stack:** vendor-neutral Python — sklearn + PyTorch (modeling), Pandera/Great Expectations (validation), MLflow (tracking/registry), FastAPI + Docker (serving), Prometheus/Grafana (observability); Kubeflow/TFX/Airflow conceptual
+- **Stack:** vendor-neutral Python — sklearn + PyTorch (modeling), Pandera/Great Expectations (validation), MLflow (tracking/registry), FastAPI + Docker (serving), Prometheus/Grafana (observability); Prefect (orchestration) + alibi-detect (drift) with code in Pass 2
 - **Depth:** maximal 18-module structure; no time constraint
 - **Format:** rich written Markdown lessons for professional self-study; no lab infrastructure yet
-- **Code:** inline Python where a concept needs it; full coded demos deferred to Pass 2 (`💻 CODED DEMO (Pass 2)`)
+- **Code:** inline Python where a concept needs it; full coded demos deferred to Pass 2, captured as `💻 CODE (Pass 2)` work-order blockquotes (demonstrates / where / requirements / accept) in the module READMEs; module-level demo code lands in each module's `code/` folder
+- **Tech shelf:** `tech/` holds per-tool reference docs (specs, versions, requirements, setup) for Prefect, alibi-detect, Airflow, Kubeflow Pipelines, TFX; the no-infra restriction is lifted for the orchestration modules (M13, M16)
 - **Exercises:** design exercises (paper-based) end every module; labs deferred
 - **Assessment:** deferred
 - **Capstone:** folded into M18 as a worked example (not a graded project)

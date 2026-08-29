@@ -128,7 +128,7 @@ Google Flu Trends predicted flu prevalence from search queries. It worked beauti
 
 > **⚠️ Failure mode** — *The postmortem pattern.* In all three cases, the model was not the villain. The villain was an unmanaged system property: a feedback loop, a skew, a drift. When you read an ML failure story, train yourself to ask not "what was the bug?" but "which layer failed, and what design decision would have caught it?"
 
-> **🐍 Reference stack at a glance** — None yet, deliberately. Failure science is a taxonomy you carry in your head, not a library you import. The tools that *detect* each failure class arrive with the layers that own them: Pandera/Great Expectations for skew and leakage (M5, M6), MLflow for unreproducible results (M7), Prometheus + Evidently for drift and silent degradation (M15, M16). For now, the stack *is* the failure taxonomy itself.
+> **🐍 Reference stack at a glance** — None yet, deliberately. Failure science is a taxonomy you carry in your head, not a library you import. The tools that *detect* each failure class arrive with the layers that own them: Pandera/Great Expectations for skew and leakage (M5, M6), MLflow for unreproducible results (M7), Prometheus + alibi-detect for drift and silent degradation (M15, M16). For now, the stack *is* the failure taxonomy itself.
 
 ## Where code is needed
 

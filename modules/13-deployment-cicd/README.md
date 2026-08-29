@@ -133,7 +133,39 @@ Each arrow is an **approval gate** (M11's promotion gate, made mechanical): a se
 
 The design decisions are all in step 2: *which metrics, what thresholds, how long must they persist before you act, and does a human approve or is it fully automatic?* Fully automatic is faster and safer for *hard* failures (errors, latency); most teams keep a human approval for *quality* regressions, where the metric is noisier and the cost of a wrong rollback is real. That split — machine for safety, human for judgment — is itself an ADR.
 
-> **🐍 Reference stack at a glance** — The CI/CD surface for M13's recommender is: **GitHub Actions / GitLab CI** (orchestrating the pipeline), **MLflow** (the registry that makes "what's in prod?" answerable and rollback a one-command operation), **Docker** (immutable model+code images that make blue-green and rollback *mechanical* rather than archaeological), and **Prometheus + Grafana** (the guardrail metrics the canary is judged against). The through-line: *the registry says what's deployed, the CI/CD says how it got there, and observability says whether it's allowed to stay.*
+> **🐍 Reference stack at a glance** — The CI/CD surface for M13's recommender is: **GitHub Actions / GitLab CI** (orchestrating the pipeline), **Prefect** (the promotion pipeline as a flow — code in Pass 2), **MLflow** (the registry that makes "what's in prod?" answerable and rollback a one-command operation), **Docker** (immutable model+code images that make blue-green and rollback *mechanical* rather than archaeological), and **Prometheus + Grafana** (the guardrail metrics the canary is judged against). The through-line: *the registry says what's deployed, the CI/CD says how it got there, and observability says whether it's allowed to stay.*
+
+> **💻 CODE (Pass 2) · Prefect** — *promotion pipeline (no-infra path).*
+> - **Demonstrates:** the promotion gates from "The promotion pipeline" — a flow that stops at a gate when a guardrail breaches, and an auto-rollback that re-points the router.
+> - **Where:** `modules/13-deployment-cicd/code/promotion_dag.py`
+> - **Requirements:** Prefect 3.x, mlflow, numpy — runs locally.
+> - **Reader should see:** canary at 5% → guardrail breach → rollback fires, never full rollout.
+> - **Accept:** `flow()` runs end-to-end; a planted guardrail breach rolls back instead of promoting.
+> - **Base:** [`tech/prefect.md`](../../tech/prefect.md)
+
+> **💻 CODE (Pass 2) · Airflow** — *promotion pipeline (infra path).*
+> - **Demonstrates:** the same promotion pipeline as an Airflow DAG — the batch-scheduling mental model vs. a gated flow, made explicit.
+> - **Where:** `modules/13-deployment-cicd/code/promotion_dag_airflow.py`
+> - **Requirements:** Airflow 2.10+ + docker-compose (scheduler, webserver, Postgres, LocalExecutor); connections to MLflow/serving. See [`tech/airflow.md`](../../tech/airflow.md).
+> - **Reader should see:** a triggered DAG run walking staging → shadow → canary → prod, with a gate task that fails the run on guardrail breach.
+> - **Accept:** `airflow dags trigger promotion` produces a run whose task graph shows the gate stopping before prod.
+> - **Base:** [`tech/airflow.md`](../../tech/airflow.md)
+
+> **💻 CODE (Pass 2) · Kubeflow Pipelines** — *promotion pipeline (K8s path).*
+> - **Demonstrates:** promotion gates as KFP components — each stage an isolated container op.
+> - **Where:** `modules/13-deployment-cicd/code/promotion_pipeline_kfp.py`
+> - **Requirements:** KFP 2.x on a k3s/minikube cluster (api-server, MinIO+MySQL, Argo); container registry. See [`tech/kubeflow-pipelines.md`](../../tech/kubeflow-pipelines.md).
+> - **Reader should see:** the compiled pipeline YAML + a run where the guardrail component fails and the promote component is skipped.
+> - **Accept:** `kfp.Client().create_run_from_pipeline_func(...)` runs; failed guardrail skips promotion.
+> - **Base:** [`tech/kubeflow-pipelines.md`](../../tech/kubeflow-pipelines.md)
+
+> **💻 CODE (Pass 2) · TFX** — *promotion path as a TFX pipeline.*
+> - **Demonstrates:** the release gate expressed as Evaluator → Pusher config in the canonical component graph.
+> - **Where:** `modules/13-deployment-cicd/code/promotion_pipeline_tfx.py`
+> - **Requirements:** `tfx==1.*`, TF, LocalDagRunner for the demo (Airflow/KFP runners optional); SQLite metadata. See [`tech/tfx.md`](../../tech/tfx.md).
+> - **Reader should see:** the component graph where Evaluator thresholds gate whether Pusher writes to prod.
+> - **Accept:** `python pipeline.py` runs locally; lowering the Evaluator threshold stops Pusher.
+> - **Base:** [`tech/tfx.md`](../../tech/tfx.md)
 
 ## Design exercise
 

@@ -51,8 +51,18 @@ A self-study course for working professionals who can train models in a notebook
 - ONNX / TorchScript 
 - Prometheus 
 - Grafana 
-- Evidently AI (conceptual) 
-- Kubeflow / TFX / Airflow (conceptual)
+- alibi-detect (drift detection)
+- Prefect (orchestration)
+
+## Tech references
+
+Specs, versions, requirements, and setup for the tools behind the stack — the reference shelf module lessons link out to. Working demos that exercise them land in each module's `code/` folder during Pass 2.
+
+- [Airflow](tech/airflow.md) — promotion pipeline (M13) & retraining loop (M16), infra path
+- [Kubeflow Pipelines](tech/kubeflow-pipelines.md) — same concepts, Kubernetes path
+- [TFX](tech/tfx.md) — same concepts, canonical component graph
+- [Prefect](tech/prefect.md) — orchestration concept, no-infra path
+- [alibi-detect](tech/alibi-detect.md) — drift detection (M15, M16)
 
 ## Status
 
