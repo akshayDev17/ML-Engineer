@@ -168,6 +168,7 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
    - **Control limits:** 
       - the **upper control limit (UCL) = λ + k·σ**,  the **lower control limit (LCL) = λ − k·σ** (never below 0), with k = 3. 
       - **σ is the standard deviation of the *fitted* distribution**: σ = √λ for the Poisson (so UCL = λ + k√λ), and σ = √(λ + λ²/r) for the negative binomial (so UCL = λ + k√(λ + λ²/r)). 
+         - yes, sigma is quite literally the sample standard deviation for NB case.
       - UCL/LCL are just the two boundaries of "normal variation": below LCL = abnormally few (drop / upstream break); above UCL = abnormally many (spike / retry storm).
    - **Tail probability (α):** alert when the observed count is so extreme it would occur with probability below **α/2** in the healthy baseline. **α is the tolerated false-alert rate** — α = 0.001 means "1 in 1,000 healthy buckets may false-alarm by pure chance."
    - **Bonferroni correction (many simultaneous tests):** if you monitor N buckets/metrics at once, each with its own α, false alarms add up — 1,440 minute-buckets at α = 0.001 is ≈ 1.4 false alarms/day on a healthy day. To hold the *overall* rate at α, divide per test: **α_per_test = α / N**. (Named after the statistician Carlo Emilio Bonferroni.)
