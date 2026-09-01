@@ -137,6 +137,12 @@ Three lines of that snippet carry the whole lesson in miniature: the session is 
 
 > **💻 CODED DEMO (Pass 2)** — A runnable end-to-end serving demo: train a tiny sklearn fraud model → export to ONNX → serve it with the FastAPI endpoint above → drive it with a load generator → watch p50/p99 latency in Prometheus as QPS climbs. The demo exists to make the latency-budget math *visible*, not just asserted.
 
+### The serving gate
+
+> **📍 Gate to develop here — the *serving gate*.** This is the place in the endpoint (right before `model.predict`) where the incoming features must be validated against the *training-time contract* — same schema, same ranges, no skew (M5's three-gate taxonomy, gate #3; M6's consistency guarantee enforced at inference). On violation: reject or fall back — never predict on skewed features.
+>
+> **📌 TODO (coding):** implement a feature-contract Pandera schema + a `validate_features()` check before inference in `modules/12-serving-architectures/code/` — ~90% reuse of the M5 `gates/` pattern.
+
 ## Design exercise
 
 You're the ML engineer on a **real-time credit scoring** system. A card network sends each transaction to you for a fraud decision with a hard **200 ms budget** (p99, end-to-end). Transactions arrive at ~500 QPS at peak, spiking to 2,000 QPS during flash sales. The features (velocity, account history, device fingerprints) live in a feature store that takes 30–60 ms to query. You have a gradient-boosted model, currently an `sklearn` pickle, that scores in ~5 ms on CPU.
