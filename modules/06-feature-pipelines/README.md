@@ -92,6 +92,12 @@ def assert_no_skew(offline_values, online_values, tolerance=1e-6):
 
 > **💻 CODED DEMO (Pass 2)** — A runnable two-path feature pipeline: define `velocity_1h` once, compute it offline (backfilled, time-travel) and online (incremental) from the same code, then show the skew test *passing* — and then introduce the "two implementations" bug and watch it *fail*. The demo exists to make the module's central claim — one code path prevents skew — visible rather than asserted.
 
+## The training gate
+
+> **📍 Gate to develop here — the *training gate*.** M6 has just materialized the training set (backfill + time-travel, above). Before it goes to the trainer (M7), that training set must be *validated*: joins point-in-time correct, label column present, class balance intact, no future leakage (M5's three-gate taxonomy, gate #2). The full theory and the code for this gate belong in this section.
+>
+> **📌 TODO (coding):** implement a `TrainingSet` Pandera schema + a `validate_training_set()` gate in `modules/06-feature-pipelines/code/` — ~90% reuse of the M5 `gates/` pattern (`DataFrameModel` + a `validate_batch`-style split into `valid` / `invalid` / `failure_cases`).
+
 ## Design exercise
 
 You're designing the feature layer for a **fraud-detection** model. Your features are windowed aggregates over transaction history: `velocity_1h` (tx count last hour), `amount_sum_24h`, `distinct_merchants_7d`, and `avg_amount_30d`.
