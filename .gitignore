@@ -8,5 +8,5 @@ __pycache__/
 .uv-cache/
 
 # generated pipeline artifacts (regenerable via simulate.py)
-**/code/data/
-**/code/out/
+**/code/**/data/
+**/code/**/out/
