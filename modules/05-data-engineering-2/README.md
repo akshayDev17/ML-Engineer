@@ -120,11 +120,59 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 
 **Deriving the baseline and thresholds.**
 
-1. **Fix the window** (e.g., 1-minute or 1-hour buckets); the metric is *count per bucket*.
+<details>
+<summary>1. <strong>Fix the window</strong> (e.g., 1-minute or 1-hour buckets); the metric is <em>count per bucket</em>.</summary>
+
    - **What an "event" is:** one event = one row = one atomic record that just landed at ingestion (one transaction, one log line, one click). At ingestion the train/serve split doesn't exist yet — the volume metric counts *all* incoming rows, regardless of whether they later become training or inference samples.
    - **Streaming vs. batch:** this is *not* streaming-only. Streaming gives fine-grained "events per minute"; batch gives "rows per run." "This daily batch has 40k rows, it normally has 2M" is the same anomaly at one sample per run — same machinery, fewer and bigger observations (so a longer baseline is needed).
 
-2. **Collect the baseline:** per-bucket counts from a period you *know* was healthy (no incidents, holidays, or deployments).
+   -  <details>
+      <summary>Choosing the bucket width — Stage A (decide before you have any buckets)</summary>
+
+         - **Why a separate decision:** the bucket's *contents* (λ̂, s², the observed bucket count n) cannot choose the width — they don't exist until you bucket. Only facts you already have plus requirements you choose can fix w.
+         - **Facts you already have (no bucketing needed):**
+            - **T** = the baseline period's duration (e.g., 28 days = 40,320 min).
+            - **N** = total events over T, counted from arrivals/logs → **r = N/T** (mean rate, events per unit time).
+         - **Requirements you choose:**
+            - **λ_floor** = events per bucket needed to catch your smallest meaningful shift Δ (derived below).
+            - **n_required** = buckets the period must yield to reliably detect overdispersion ρ ≥ ρ\* (χ² power analysis: ≈100 to catch ρ ≥ 1.5; ≈300 for ρ ≥ 1.3).
+         - **The bracket** (both ends knowable before any bucket exists):
+            - **w ≥ λ_floor / r** — long enough that each bucket clears λ_floor (sensitivity).
+            - **w ≤ T / n_required** — short enough that the fixed period T yields ≥ n_required buckets (stability).
+         - **Empty bracket = infeasible requirements**, not a bad width choice: relax Δ (accept bigger shifts), extend T (more history), or accept fewer buckets.
+         - **Busy feed:** r = 100 ev/min, T = 28 days = 40,320 min, λ_floor = 300, n_required = 300 → w ∈ [3, 134] min; pick w = 5 min → n = 8,064 buckets, λ = 500/bucket.
+         - **Quiet feed (infeasible):** r = 1 ev/min, T = 7 days = 10,080 min, λ_floor = 100, n_required = 200 → w ∈ [100, 50.4] → empty. Fix: extend T to 28 days (w ≤ 201 min) or relax λ_floor to 50.
+
+      </details>
+   -  <details>
+      <summary>Where λ_floor comes from — exact per-bucket detection power (no normal approximation)</summary>
+
+         - **The question:** at λ events/bucket, is a rate shift of fraction Δ detectable? It's a two-distribution separation question, answered with the exact ppf/CDF — the same machinery the limits use.
+         - **Healthy bucket:** X ~ Poisson(λ).
+         - **UCL** = the exact (1 − α/2)-quantile of the healthy distribution → `poisson.ppf(1 - alpha/2, λ)` (the very ppf used to draw the limits).
+         - **Shifted bucket:** X′ ~ Poisson(λ(1 + Δ)) — the rate moved by Δ.
+         - **Per-bucket detection power:** q(Δ; λ) = P(X′ > UCL) = 1 − F_{λ(1+Δ)}(UCL) — the shifted distribution's CDF evaluated at the healthy threshold.
+         - **The requirement:** choose a target per-bucket power **q\*** (0.5 = the "detectable" floor; 0.9 = strong). **λ_floor = the smallest λ with q(Δ; λ) ≥ q\***, read off the exact CDF. No normal anywhere.
+         - **Exact values (α = 0.001 per bucket, two-sided):**
+
+            | Δ | λ for q ≥ 0.5 | λ for q ≥ 0.9 |
+            |---|---|---|
+            | 10% | ≈1,130 | ≈2,180 |
+            | 20% | ≈295 | ≈570 |
+            | 30% | ≈135 | ≈265 |
+            | 50% | ≈52 | ≈105 |
+
+         - **Reading the table:** at λ ≈ 300 you catch a 20% shift in about half of buckets; at λ ≈ 570, in about 90% of them.
+         - **NB case:** same recipe with `nbinom.ppf` / `nbinom.cdf`, shifted mean λ(1 + Δ), same dispersion r — heavier dispersion (smaller r) needs more λ for the same q.
+         - **N-of-M note:** q is *per-bucket* power. A sustained shift across M buckets fires the run rule at far lower per-bucket q, so these λ_floor values are the honest single-bucket floor, and the run rule rides on top.
+
+      </details>
+
+</details>
+
+<details>
+<summary>2. <strong>Collect the baseline:</strong> per-bucket counts from a period you <em>know</em> was healthy (no incidents, holidays, or deployments).</summary>
+
    - **How many buckets (the non-seasonal answer):**
        - The baseline needs *enough buckets* to estimate both λ and its spread, not a fixed span of calendar time.
        - **~100 consecutive healthy buckets** is a safe default; a few hundred gives a tighter overdispersion check (below).
@@ -138,7 +186,11 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
        - **Bootstrap from the first N days.** Take the first 2–4 weeks as the baseline and *accept the risk* that those weeks may contain an anomaly (a bug, a bot, a launch spike) — you may bake a dirty period into "normal."
        - **Accept blindness to the first anomaly.** With zero clean history, "drift" is mathematically undefined: you cannot tell "this is the new normal" from "this is a problem," because both look like a change from nothing. The first anomaly is undetectable; you can only detect *changes after* you've established a baseline.
 
-3. **Model the bucket count as a Gamma–Poisson mixture — the overdispersion check decides Poisson vs NB:** 
+</details>
+
+<details>
+<summary>3. <strong>Model the bucket count as a Gamma–Poisson mixture — the overdispersion check decides Poisson vs NB:</strong> </summary>
+
    - the rate **λ (lambda)** = the average count per bucket = (total events) ÷ (number of buckets); 
    - its spread is **σ = √λ** — the *model's* theoretical standard deviation (a population quantity of the fitted distribution), *not* a spread measured from the observed buckets (that measured spread, the sample variance is used only for the overdispersion check below).
    - **Mean example:** buckets `[10, 12, 9, 11, 13]` → λ = 55 / 5 = 11 events/min, σ = √11 ≈ 3.32.
@@ -164,20 +216,37 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
          - r is **fixed per baseline** (per time-slice with seasonality), like λ — not re-estimated per bucket.
       - **📌 TODO (drifting mean):** overdispersion has a second cause we're yet to discuss — a *drifting mean* inside the baseline window (slow growth or decline, not burstiness). That's a non-stationarity problem, not a dispersion problem: the fix is to shorten or detrend the baseline and re-estimate λ, not to switch distributions.
 
-4. **Set the alert limits** from the fitted model — either *control limits* or *tail probability*:
-   - **Control limits:** 
-      - the **upper control limit (UCL) = λ + k·σ**,  the **lower control limit (LCL) = λ − k·σ** (never below 0), with k = 3. 
-      - **σ is the standard deviation of the *fitted* distribution**: σ = √λ for the Poisson (so UCL = λ + k√λ), and σ = √(λ + λ²/r) for the negative binomial (so UCL = λ + k√(λ + λ²/r)). 
-         - yes, sigma is quite literally the sample standard deviation for NB case.
-      - UCL/LCL are just the two boundaries of "normal variation": below LCL = abnormally few (drop / upstream break); above UCL = abnormally many (spike / retry storm).
-   - **Tail probability (α):** alert when the observed count is so extreme it would occur with probability below **α/2** in the healthy baseline. **α is the tolerated false-alert rate** — α = 0.001 means "1 in 1,000 healthy buckets may false-alarm by pure chance."
-   - **Bonferroni correction (many simultaneous tests):** if you monitor N buckets/metrics at once, each with its own α, false alarms add up — 1,440 minute-buckets at α = 0.001 is ≈ 1.4 false alarms/day on a healthy day. To hold the *overall* rate at α, divide per test: **α_per_test = α / N**. (Named after the statistician Carlo Emilio Bonferroni.)
+</details>
 
-5. **Remove seasonality:** arrival rate has time-of-day / day-of-week patterns, so fit a *separate λ per time-slice* — compare "this Monday-2pm bucket" to all Monday-2pm buckets in the baseline, never to "all buckets."
+<details>
+<summary>4. <strong>Set the alert limits</strong> from the fitted model — fix the tolerated false-alert rate α first; the limits then follow from it:</summary>
+
+   - **Tail probability (α):** alert when the observed count is so extreme that it would occur with probability below **α/2** in the healthy baseline.
+      - **$H_0$ (null hypothesis):** the bucket's count is a normal draw from the healthy distribution fitted on the baseline (Poisson/NB) — the process is unchanged.
+      - **$H_1$ (alternative hypothesis):** the count is not from that distribution — the rate has moved (spike or drop), so the bucket is anomalous.
+      - **UCL/LCL are the rejection region:** a count inside [LCL, UCL] *fails to reject* $H_0$ (treated as healthy — normal variation); a count crossing either limit *rejects* $H_0$ (flagged as a probable anomaly).
+      - **What α is:** the tolerated false-alert rate — **α is the probability that a perfectly healthy bucket still lands beyond UCL/LCL purely by chance (hence the name *false-alarm alert*), because the healthy distribution itself has real tails.** α = 0.001 means "1 in 1,000 healthy buckets may false-alarm by pure chance."
+   - **Set the limits from the fitted distribution's quantiles (ppf — no normal approximation):**
+      - **UCL** = the smallest integer $c$ such that $P(X \le c) = \sum_{k=0}^{c} \frac{\lambda^k e^{-\lambda}}{k!} \ge 1 - \frac{\alpha}{2}$ → in code: `poisson.ppf(1 - alpha/2, lam)` (Poisson) or `nbinom.ppf(1 - alpha/2, r, r/(r+lam))` (NB).
+      - **LCL** = the largest integer $c$ such that $P(X \le c-1) = \sum_{k=0}^{c-1} \frac{\lambda^k e^{-\lambda}}{k!} \le \frac{\alpha}{2}$ → in code: `poisson.ppf(alpha/2, lam)` (Poisson) or `nbinom.ppf(alpha/2, r, r/(r+lam))` (NB).
+      - These are the $\alpha/2$ and $1-\alpha/2$ **quantiles** of the fitted distribution — exact at every λ and r. (The $\lambda \pm k\sigma$ "3σ" form is only the pre-computer normal *approximation* to these quantiles at large λ, and is **not used** for the limits.)
+      - **The fitted distribution's spread (for reference):** σ = √λ for the Poisson; σ = √(λ + λ²/r) for the negative binomial.
+         - yes, sigma is quite literally the sample standard deviation for NB case.
+      - UCL/LCL are the two boundaries of "normal variation": below LCL = abnormally few (drop / upstream break); above UCL = abnormally many (spike / retry storm).
+
+</details>
+
+<details>
+<summary>5. <strong>Remove seasonality:</strong> arrival rate has time-of-day / day-of-week patterns, so fit a <em>separate λ per time-slice</em> — compare "this Monday-2pm bucket" to all Monday-2pm buckets in the baseline, never to "all buckets."</summary>
+
    - **How to use it:** define slices as (day-of-week × hour); for "Monday 2pm," collect all Monday-2pm buckets from the baseline and set λ_Monday2pm = their mean; separately λ_Saturday9am from all Saturday-9am buckets. A new Monday-2pm bucket is compared to λ_Monday2pm (and its limits), a Saturday-9am bucket to λ_Saturday9am. The predictable pattern is absorbed into the expected value, so the alarm fires only on the *surprise*.
    - **Sparse slices:** if a slice has too few baseline samples, coarsen it (merge into "9am, all days" or "weekday vs weekend"), or fit a simple forecast (expected = f(day-of-week, hour)) and alert on observed-minus-forecast.
 
-6. **Pre-commit the trigger rule** — never a single blip. The standard form is **"N of the last M"**: alert only if *at least N of the most recent M buckets* cross the limit in the same direction. A single crossing is expected by chance (that's what α quantifies); a *run* of crossings is not.
+</details>
+
+<details>
+<summary>6. <strong>Pre-commit the trigger rule</strong> — never a single blip. The standard form is <strong>"N of the last M"</strong>: alert only if <em>at least N of the most recent M buckets</em> cross the limit in the same direction. A single crossing is expected by chance (that's what α quantifies); a <em>run</em> of crossings is not.</summary>
+
    - **Two directions, two counters:** "crossing the limit" is *directional* — a bucket above UCL is a **spike**, a bucket below LCL is a **drop**, and they are different anomalies. Keep **two separate run counters** (one for `x > UCL`, one for `x < LCL`), each with its own N-of-M rule; never merge a spike and a drop into one "bad" flag, or a spike followed by a drop can masquerade as a run of a single anomaly.
    - **Formally:** let $b_j \in \{0,1\}$ mark whether bucket $j$ crossed the limit in that direction. Alert when
      $$\sum_{j=i-M+1}^{i} b_j \;\geq\; N .$$
@@ -193,6 +262,8 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
      | b10 | b4–b10 | 5 | yes |
      A single healthy b7 (and b10) inside the run does **not** cancel the alert — the window is majority-bad, so the episode is one continuous event, judged on the run, not the bucket.
    - **Costs:** (1) *lag* — you need M buckets before you can evaluate, and the alert fires a couple buckets after onset; (2) *a tuning choice* — larger N (relative to M) is slower but more false-positive-resistant. N and M are pre-committed once.
+
+</details>
 
 **The judgment runbook.**
 1. Note direction (drop/spike), the window, and how many buckets tripped.
@@ -283,6 +354,27 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 **Worked example.** `merchant_category` has 400 codes; one day "9999" (never seen) hits 3% of rows. Human: 9999 isn't a valid merchant code — it's the upstream's "unknown" placeholder → misparse → fix upstream. Contrast: a real new code "7801" appears → legit new segment → update the register; the model will be cold on it.
 
 The principle from M15 applies here verbatim: these are **tripwires, not verdicts**. They tell you to *look*, not to act. The action — retrain, fix the feed, re-pin a feature — comes only after diagnosis.
+
+### Bonferroni correction (many simultaneous tests)
+
+If you monitor N buckets/metrics at once, each with its own α, false alarms add up — 1,440 minute-buckets at α = 0.001 is ≈ 1.4 false alarms/day on a healthy day. To hold the *overall* rate at α, divide per test: **α_per_test = α / N**. (Named after the statistician Carlo Emilio Bonferroni.)
+
+**What "N at once" means.** N simultaneous hypothesis tests every minute — a volume check on *each* feed (e.g., 50 feeds, each with its own λ and UCL/LCL), plus per-column checks (50 feeds × ~30 columns × ~3 stats ≈ 4,500 checks/minute):
+
+| Feed | λ (events/min) |
+|---|---|
+| card transactions | 1,000 |
+| logins | 50 |
+| clickstream | 40,000 |
+| ACH payments | 200 |
+| device fingerprints | 300 |
+| … 45 more | … |
+
+("is feed #1's count beyond its limits? feed #2? … feed #50?" — 50 hypothesis tests going off together, every single bucket.)
+
+**The time axis multiplies it.** Each check re-fires next bucket. At 1-minute resolution: 1,440 buckets/day → 72,000 volume tests/day (50 feeds), or ~6.5 million tests/day across all checks.
+
+**Why it matters.** Every test is an independent chance to false-alarm. On a perfectly healthy day, 72,000 × 0.001 = ~72 false alerts/day from volume checks alone — thousands across all checks — paged to on-call by pure chance.
 
 ## Data documentation & lineage
 
