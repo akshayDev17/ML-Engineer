@@ -586,51 +586,59 @@ flowchart TB
 
 - **The one-line rule.** Re-baseline only when (a) CUSUM confirms a sustained shift, (b) the volume-to-breadth ratio is stable, (c) composition PSI < 0.25, and (d) business signals corroborate — and estimate $\lambda_{\text{new}}$ from a stable confirmation window, never from the transition itself.
 
-- **The default case — identity-blind upstream (a proprietary feed we are a customer of): structural confirmation.** This is the procedure for when the events carry no identity we can see: we are not privy to the sign-ups or the user activity on the vendor's side that raised the stream's frequency — all we observe is that the frequency increased. The causal discriminator of the growth-vs-raid framing above is *unmeasurable* here, so the question stops being "why did volume rise?" and becomes a structural one: **is this a stable new regime (a new level), or a transient that will revert?** Consuming someone else's feed is the common case, so this is the default re-baselining algorithm; the growth-vs-raid framing above is its special case, usable only when an identity axis happens to exist.
-   - **Why permanence is only *confirmed*, never detected at onset.** Any finite prefix of a permanent level shift is indistinguishable from the prefix of a transient pulse that will revert later — the return simply has not happened yet. So the algorithm never decides at onset; it waits a pre-committed **confirmation horizon H** and then tests whether the new level *holds* and *looks like the same process*. Re-baselining early is the only expensive mistake (it bakes the anomaly into "normal" and silences future alarms for the same cause); re-baselining late only costs repeated alerts. **Default posture: when in doubt, wait.**
+- **User identity-blind upstream (a proprietary feed we are a customer of): structural confirmation.** 
+   - When the events carry no identity we can see: not privy to the sign-ups or the user activity on the vendor's side that raised the stream's frequency — all we observe is that the frequency increased.
+   - **Why permanence is only *confirmed*, never detected at onset.** The algorithm never decides permanent baseline shift at onset; it waits a pre-committed **confirmation horizon H** and then tests whether the new level *holds* and *looks like the same process*. 
+      - Re-baselining early is the only expensive mistake (it bakes the anomaly into "normal" and silences future alarms for the same cause); re-baselining late only costs repeated alerts. \
+      **Default posture: when in doubt, wait.**
    - **Step 1 — the alarm fires; start the clock; touch nothing.** The alert rule (N-of-M, or CUSUM in the enact block above) trips at the first crossing, time **$t_0$**. Every bucket continues to be judged against the **old** baseline — no parameter changes yet.
    - **Step 2 — keep the alarm live through the confirmation horizon $H$.** **H = the longest transient ever observed on this feed** (a pre-committed constant, chosen like $T_{\text{latency}}$: fixed once from history, never guessed or adjusted while an event is live). In bucket units the candidate window holds $H_b = H/w$ buckets.
    - **Step 3 — at $t_0 + H$, run the battery on the candidate window $[t_0,\, t_0+H)$** (transition buckets excluded). All four checks must pass:
-      - **(a) Slice uniformity — the decision is a function of the hyperparameters you set: pass/fail = U(α_slice, S, φ̂).** The rise must be spread across the (day-of-week × hour) slices in proportion — every slice grows by roughly the same factor (uniform scaling = the slice mix is preserved), not concentrated in a few slices. Of the three arguments, only one is set at this check; the other two are inherited from earlier steps:
-         - **α_slice — this test's own false-alert budget (the only new hyperparameter; set here).**  
-            - The tolerated chance of declaring "the mix changed" when the mix is unchanged. 
-            - default **α_slice = 0.05**.
-         - **S — the number of slices (inherited, not set here).** 
-            - Fixed by step 5's (day-of-week × hour) granularity: coarser slices → a weaker test; finer slices → sparse cells (merge sparse slices, per step 5).
-         - **φ̂ — the old baseline's NB dispersion (inherited, not set here).** 
-            - Fixed by the baseline fit via method of moments, $\hat\varphi = \hat\lambda^2/(s^2-\hat\lambda)$; never re-estimated on the candidate window, never set by hand. 
-            - **NB only** — this check does not branch to Poisson: the feed is overdispersed, and Poisson is simply the φ̂ → ∞ limit that the NB machinery already contains.
-         - **The NB equations, per cell (s, P) of the slice × period table:**
-            - Per-slice variance-to-mean ratio: $\rho_s = 1 + \lambda_s/\hat\varphi$, where λ_s = slice s's per-bucket mean on the old baseline. 
-            - Cell variance: $\mathrm{Var}(O_{s,P}) = \rho_s \cdot E_{s,P}$ — variance is ρ × the expected count; ρ's derivation is step 3's chain (σ² = λ + λ²/φ, divide by λ).
-            - $O_{s,P}$ = the measured cell count; $E_{s,P} = R_s C_P / G$ — the full calculations of both are in the sub-bullets below.
-            - The statistic: $\chi^2_u = \sum_s \sum_P \dfrac{(O_{s,P} - E_{s,P})^2}{\rho_s \cdot E_{s,P}}$ — each term is a variance-1 residual, ((O−E)/√Var)², so the sum needs no further scaling.
-            - Degrees of freedom: $\mathrm{df} = S - 1$ (two periods: (S−1)(2−1) — the row totals, the column totals and the grand total are fixed by the data, leaving S−1 free cells). As with every χ² test, the distributional claim is asymptotic.
-            - **The table — the object O and E live in.** Columns = **periods P**: **old** (the baseline period λ_old was measured on) and **new** (the sustained post-shift window, transition excluded). Rows = **time slices s**: the same (day-of-week × hour) slices step 5 uses. Every event lands in exactly one cell (s, P) — its slice comes from its timestamp's day-of-week × hour, its period from which window contains that timestamp. The example below uses three coarse slices (night / day / evening) so the arithmetic stays readable; the full (day × hour) version has 168 rows and identical arithmetic. Counts below are in thousands of events.
+      - <details>
+          <summary><strong>(a) Slice uniformity — pass/fail = U(α_slice, S, φ̂)</strong></summary>
 
-              | slice s | old | new | row total $R_s$ |
-              |---|---|---|---|
-              | night (00–08) | 1,000 | 1,050 | 2,050 |
-              | day (08–16) | 2,000 | 3,000 | 5,000 |
-              | evening (16–24) | 1,500 | 1,800 | 3,300 |
-              | column total $C_P$ | 4,500 | 5,850 | $G$ = 10,350 |
+          The rise must be spread across the (day-of-week × hour) slices in proportion — every slice grows by roughly the same factor (uniform scaling = the slice mix is preserved), not concentrated in a few slices. Of the three arguments, only one is set at this check; the other two are inherited from earlier steps:
 
-            - **O — observed (measured, never derived).** $O_{s,P}$ = the events actually counted in cell (s, P). To compute it: (1) pick one cell (one slice s, one period P); (2) take every bucket whose timestamp lies in period P and keep those whose timestamp also lies in slice s; (3) sum the kept buckets' counts — $O_{s,P} = \sum_{j \in (s,P)} x_j$. Nothing else is involved: O is read off the data, never computed from other cells.
-               - **Worked — (s = night, P = old):** the old period's night buckets sum to **O = 1,000** (e.g., three buckets 320 + 340 + 340).
-               - **Worked — (s = day, P = new):** the new period's day buckets sum to **O = 3,000**.
-            - **E — expected (derived, never measured).** $E_{s,P}$ = the count slice s *would* contribute to period P **if the slice mix were identical in both periods** — the periods would then differ only in total size (new = old scaled uniformly). E is not data; it is computed from the table's own totals, in four steps:
-               - **Step 1 — row total $R_s = O_{s,\text{old}} + O_{s,\text{new}}$** — the slice's pooled evidence: under "same mix" the two periods are one population, so both testify about s's share. $R_{\text{night}} = 1{,}000 + 1{,}050 = 2{,}050$; $R_{\text{day}} = 2{,}000 + 3{,}000 = 5{,}000$; $R_{\text{evening}} = 1{,}500 + 1{,}800 = 3{,}300$.
-               - **Step 2 — column total $C_P = \sum_s O_{s,P}$** — each period's total size. $C_{\text{old}} = 1{,}000 + 2{,}000 + 1{,}500 = 4{,}500$; $C_{\text{new}} = 1{,}050 + 3{,}000 + 1{,}800 = 5{,}850$.
-               - **Step 3 — grand total $G$.** $G = C_{\text{old}} + C_{\text{new}} = 4{,}500 + 5{,}850 = 10{,}350$, which must equal $\sum_s R_s = 2{,}050 + 5{,}000 + 3{,}300 = 10{,}350$ — the same number by two routes, a built-in check.
-               - **Step 4 — the expected cell:** $E_{s,P} = \frac{R_s \cdot C_P}{G}$ — the slice's pooled share ($R_s / G$) of the period's size ($C_P$).
-            - **E — worked examples (the same four steps, applied to specific cells):**
-               - **Example A — (s = night, P = old):** $E_{\text{night,old}} = \frac{R_{\text{night}} \cdot C_{\text{old}}}{G} = \frac{2{,}050 \times 4{,}500}{10{,}350} = \frac{9{,}225{,}000}{10{,}350} \approx 891.3$. Night "should" contribute ≈ 891 (thousand events) to old; it actually contributes **O = 1,000**.
-               - **Example B — (s = day, P = new):** $E_{\text{day,new}} = \frac{R_{\text{day}} \cdot C_{\text{new}}}{G} = \frac{5{,}000 \times 5{,}850}{10{,}350} = \frac{29{,}250{,}000}{10{,}350} \approx 2{,}826.1$. Day "should" contribute ≈ 2,826 to new; it actually contributes **O = 3,000**.
-               - **Arithmetic self-check:** within each column the E's sum back to that column's total: $E_{\text{night,old}} + E_{\text{day,old}} + E_{\text{evening,old}} = 891.3 + 2{,}173.9 + 1{,}434.8 = 4{,}500 = C_{\text{old}}$ (rounding aside). E never creates or destroys events — it only redistributes each column total according to the pooled shares.
-         - **The pass/fail comparison:**
-            - Critical value: $\chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the (1−α_slice)-**quantile** of the χ² distribution with S−1 degrees of freedom: inverse CDF / ppf, function notation not multiplication (the Stage B note; in code `chi2.ppf(1 - alpha_slice, S - 1)`).
-            - **Passes** (uniform scaling is consistent — contributes to re-baseline): $\chi^2_u \le \chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the observed scatter is within what sampling noise alone produces.
-            - **Fails** (mix changed / growth concentrated — blocks re-baseline, investigate): $\chi^2_u > \chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the scatter is larger than chance alone would produce.
+          - **α_slice — this test's own false-alert budget (the only new hyperparameter; set here).**  
+             - The tolerated chance of declaring "the mix changed" when the mix is unchanged. 
+             - default **α_slice = 0.05**.
+          - **S — the number of slices (inherited, not set here).** 
+             - Fixed by step 5's (day-of-week × hour) granularity: coarser slices → a weaker test; finer slices → sparse cells (merge sparse slices, per step 5).
+          - **φ̂ — the old baseline's NB dispersion (inherited, not set here).** 
+             - Fixed by the baseline fit via method of moments, $\hat\varphi = \hat\lambda^2/(s^2-\hat\lambda)$; never re-estimated on the candidate window, never set by hand. 
+             - **NB only** — this check does not branch to Poisson: the feed is overdispersed, and Poisson is simply the φ̂ → ∞ limit that the NB machinery already contains.
+          - **The NB equations, per cell (s, P) of the slice × period table:**
+             - Per-slice variance-to-mean ratio: $\rho_s = 1 + \lambda_s/\hat\varphi$, where λ_s = slice s's per-bucket mean on the **old baseline**.
+             - Cell variance: $\mathrm{Var}(O_{s,P}) = \rho_s \cdot E_{s,P}$ — variance is ρ × the expected count; ρ's derivation is step 3's chain (σ² = λ + λ²/φ, divide by λ).
+             - $O_{s,P}$ = the measured cell count; $E_{s,P} = R_s C_P / G$ — the full calculations of both are in the sub-bullets below.
+             - The statistic: $\chi^2_u = \sum_s \sum_P \dfrac{(O_{s,P} - E_{s,P})^2}{\rho_s \cdot E_{s,P}}$ — each term is a variance-1 residual, ((O−E)/√Var)², so the sum needs no further scaling.
+             - Degrees of freedom: $\mathrm{df} = S - 1$ (two periods: (S−1)(2−1) — the row totals, the column totals and the grand total are fixed by the data, leaving S−1 free cells). As with every χ² test, the distributional claim is asymptotic.
+             - **The table — the object O and E live in.** Columns = **periods P**: **old** (the baseline period λ_old was measured on) and **new** (the sustained post-shift window, transition excluded). Rows = **time slices s**: the same (day-of-week × hour) slices step 5 uses. Every event lands in exactly one cell (s, P) — its slice comes from its timestamp's day-of-week × hour, its period from which window contains that timestamp. The example below uses three coarse slices (night / day / evening) so the arithmetic stays readable; the full (day × hour) version has 168 rows and identical arithmetic. Counts below are in thousands of events.
+
+               | slice s | old | new | row total $R_s$ |
+               |---|---|---|---|
+               | night (00–08) | 1,000 | 1,050 | 2,050 |
+               | day (08–16) | 2,000 | 3,000 | 5,000 |
+               | evening (16–24) | 1,500 | 1,800 | 3,300 |
+               | column total $C_P$ | 4,500 | 5,850 | $G$ = 10,350 |
+
+             - **O — observed (measured, never derived).** $O_{s,P}$ = the events actually counted in cell (s, P). To compute it: (1) pick one cell (one slice s, one period P); (2) take every bucket whose timestamp lies in period P and keep those whose timestamp also lies in slice s; (3) sum the kept buckets' counts — $O_{s,P} = \sum_{j \in (s,P)} x_j$. Nothing else is involved: O is read off the data, never computed from other cells.
+                - **Worked — (s = night, P = old):** the old period's night buckets sum to **O = 1,000** (e.g., three buckets 320 + 340 + 340).
+                - **Worked — (s = day, P = new):** the new period's day buckets sum to **O = 3,000**.
+             - **E — expected (derived, never measured).** $E_{s,P}$ = the count slice s *would* contribute to period P **if the slice mix were identical in both periods** — the periods would then differ only in total size (new = old scaled uniformly). E is not data; it is computed from the table's own totals, in four steps:
+                - **Step 1 — row total $R_s = O_{s,\text{old}} + O_{s,\text{new}}$** — the slice's pooled evidence: under "same mix" the two periods are one population, so both testify about s's share. $R_{\text{night}} = 1{,}000 + 1{,}050 = 2{,}050$; $R_{\text{day}} = 2{,}000 + 3{,}000 = 5{,}000$; $R_{\text{evening}} = 1{,}500 + 1{,}800 = 3{,}300$.
+                - **Step 2 — column total $C_P = \sum_s O_{s,P}$** — each period's total size. $C_{\text{old}} = 1{,}000 + 2{,}000 + 1{,}500 = 4{,}500$; $C_{\text{new}} = 1{,}050 + 3{,}000 + 1{,}800 = 5{,}850$.
+                - **Step 3 — grand total $G$.** $G = C_{\text{old}} + C_{\text{new}} = 4{,}500 + 5{,}850 = 10{,}350$, which must equal $\sum_s R_s = 2{,}050 + 5{,}000 + 3{,}300 = 10{,}350$ — the same number by two routes, a built-in check.
+                - **Step 4 — the expected cell:** $E_{s,P} = \frac{R_s \cdot C_P}{G}$ — the slice's pooled share ($R_s / G$) of the period's size ($C_P$).
+             - **E — worked examples (the same four steps, applied to specific cells):**
+                - **Example A — (s = night, P = old):** $E_{\text{night,old}} = \frac{R_{\text{night}} \cdot C_{\text{old}}}{G} = \frac{2{,}050 \times 4{,}500}{10{,}350} = \frac{9{,}225{,}000}{10{,}350} \approx 891.3$. Night "should" contribute ≈ 891 (thousand events) to old; it actually contributes **O = 1,000**.
+                - **Example B — (s = day, P = new):** $E_{\text{day,new}} = \frac{R_{\text{day}} \cdot C_{\text{new}}}{G} = \frac{5{,}000 \times 5{,}850}{10{,}350} = \frac{29{,}250{,}000}{10{,}350} \approx 2{,}826.1$. Day "should" contribute ≈ 2,826 to new; it actually contributes **O = 3,000**.
+                - **Arithmetic self-check:** within each column the E's sum back to that column's total: $E_{\text{night,old}} + E_{\text{day,old}} + E_{\text{evening,old}} = 891.3 + 2{,}173.9 + 1{,}434.8 = 4{,}500 = C_{\text{old}}$ (rounding aside). E never creates or destroys events — it only redistributes each column total according to the pooled shares.
+          - **The pass/fail comparison:**
+             - Critical value: $\chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the (1−α_slice)-**quantile** of the χ² distribution with S−1 degrees of freedom: inverse CDF / ppf, function notation not multiplication (the Stage B note; in code `chi2.ppf(1 - alpha_slice, S - 1)`).
+             - **Passes** (uniform scaling is consistent — contributes to re-baseline): $\chi^2_u \le \chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the observed scatter is within what sampling noise alone produces.
+             - **Fails** (mix changed / growth concentrated — blocks re-baseline, investigate): $\chi^2_u > \chi^2_{S-1}(1-\alpha_{\text{slice}})$ — the scatter is larger than chance alone would produce.
+          </details>
       - **(b) Noise invariance** — the level moved, but the arrival *process* must not have changed shape:
          - *Poisson feed:* the candidate window must still pass the index-of-dispersion test — $D = (n-1)\cdot s^2/\hat\lambda$ must stay inside the band $D \le \chi^2_{n-1}(1-\alpha_{\text{disp}})$ (the Stage B test from step 1, re-run on the candidate buckets). Outside the band: burstier than Poisson → the process changed, not just its level.
          - *NB feed:* compare **dispersions, not ratios** — $\hat\varphi_{\text{cand}} \approx \hat\varphi_{\text{old}}$, where $\hat\varphi = \hat\lambda^2/(s^2-\hat\lambda)$. The variance-to-mean ratio $\rho = 1 + \lambda/\varphi$ rises with the level at fixed $\varphi$, so $\rho$ is the wrong invariant; $\varphi$ (the burstiness of the rate process) is the level-invariant one.
