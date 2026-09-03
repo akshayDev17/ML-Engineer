@@ -104,6 +104,20 @@ flowchart LR
 
 Notice the two different *responses* to failure: at ingestion you **quarantine and alert** (the data can be fixed and replayed); at serving you **fall back** (you can't fix the world in 200 ms — you degrade gracefully). Validation isn't just "reject bad data"; it's *deciding what the system does when data is bad*, at each gate.
 
+<a id="intake-buffer"></a>
+
+**🏗️ The intake buffer (architecture).** Producers don't push events straight to the warehouse — a **holding queue** sits between them: an **intake buffer** (a Kafka topic, a broker/spool buffer, an in-memory queue) where events wait until consumers drain them.
+
+Why the buffer is architecturally required, not optional plumbing:
+- **Decoupling:** producers and consumers don't block each other.
+- **Burst absorption:** a spike fills the buffer instead of overwhelming the consumer.
+- **Backpressure room:** a stalled consumer grows the buffer instead of crashing the producer.
+- **Replay window:** events linger long enough to be reprocessed after a failure.
+
+The one number that matters here: the buffer's **capacity K** (in events). 
+- If consumers stall while producers keep producing at rate r, the buffer fills in ≈ **K/r** — and after that it **overflows: events are permanently dropped**. 
+- So K/r is the *time until data loss*: a hard architectural ceiling on how late detection may be (used by step 6's T_max).
+
 ## Drift at ingestion & anomaly detection
 
 A schema gate catches *hard* breaks — wrong type, missing column, out-of-range value. 
@@ -118,66 +132,116 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 
 **What it detects.** The number of events (rows) arriving per fixed time window. A drop usually means an upstream break (a cascading failure); a spike means a retry storm or a bot.
 
-**Deriving the baseline and thresholds.**
+#### Deriving the baseline and thresholds.
 
 <details>
-<summary>1. <strong>Fix the window</strong> (e.g., 1-minute or 1-hour buckets); the metric is <em>count per bucket</em>.</summary>
+<summary>1. <strong>Fix the window</strong> — bucket width w = F(Δ, q*, α, β, ρ*, E, T); the metric is <em>count per bucket</em> (e.g., 1-minute or 1-hour buckets).</summary>
 
    - **What an "event" is:** one event = one row = one atomic record that just landed at ingestion (one transaction, one log line, one click). At ingestion the train/serve split doesn't exist yet — the volume metric counts *all* incoming rows, regardless of whether they later become training or inference samples.
    - **Streaming vs. batch:** this is *not* streaming-only. Streaming gives fine-grained "events per minute"; batch gives "rows per run." "This daily batch has 40k rows, it normally has 2M" is the same anomaly at one sample per run — same machinery, fewer and bigger observations (so a longer baseline is needed).
 
-   -  <details>
-      <summary>Choosing the bucket width — Stage A (decide before you have any buckets)</summary>
+   -  **Choosing the bucket width**
+      -  <details>
+         <summary>Stage A — decide Δ, q*, α (N and T are given facts); ρ* and β belong to Stage B's n_required determination — before you have any buckets</summary>
 
-         - **Why a separate decision:** the bucket's *contents* (λ̂, s², the observed bucket count n) cannot choose the width — they don't exist until you bucket. Only facts you already have plus requirements you choose can fix w.
-         - **Facts you already have (no bucketing needed):**
-            - **T** = the baseline period's duration (e.g., 28 days = 40,320 min).
-            - **N** = total events over T, counted from arrivals/logs → **r = N/T** (mean rate, events per unit time).
-         - **Requirements you choose:**
-            - **λ_floor** = events per bucket needed to catch your smallest meaningful shift Δ (derived below).
-            - **n_required** = buckets the period must yield to reliably detect overdispersion ρ ≥ ρ\* (χ² power analysis: ≈100 to catch ρ ≥ 1.5; ≈300 for ρ ≥ 1.3).
-         - **The bracket** (both ends knowable before any bucket exists):
-            - **w ≥ λ_floor / r** — long enough that each bucket clears λ_floor (sensitivity).
-            - **w ≤ T / n_required** — short enough that the fixed period T yields ≥ n_required buckets (stability).
-         - **Empty bracket = infeasible requirements**, not a bad width choice: relax Δ (accept bigger shifts), extend T (more history), or accept fewer buckets.
-         - **Busy feed:** r = 100 ev/min, T = 28 days = 40,320 min, λ_floor = 300, n_required = 300 → w ∈ [3, 134] min; pick w = 5 min → n = 8,064 buckets, λ = 500/bucket.
-         - **Quiet feed (infeasible):** r = 1 ev/min, T = 7 days = 10,080 min, λ_floor = 100, n_required = 200 → w ∈ [100, 50.4] → empty. Fix: extend T to 28 days (w ≤ 201 min) or relax λ_floor to 50.
+            - **Why a separate decision:** the bucket's *contents* (λ̂, s², the observed bucket count n) cannot choose the width — they don't exist until you bucket. Only facts you already have plus requirements you choose can fix w.
+            - **Facts you already have (no bucketing needed):**
+               - **T** = the baseline period's duration (e.g., 28 days = 40,320 min).
+               - **E** = total events over T, counted from arrivals/logs → **r = E/T** (mean rate, events per unit time).
+            - **Requirements you choose:**
+               - **λ_floor** = events per bucket needed to catch your smallest meaningful shift Δ (derived below).
+               - **n_required** = buckets the period must yield to reliably detect overdispersion ρ ≥ ρ\* (χ² power analysis: ≈100 to catch ρ ≥ 1.5; ≈300 for ρ ≥ 1.3).
+            - **The bracket** (both ends knowable before any bucket exists):
+               - **w ≥ λ_floor / r** — long enough that each bucket clears λ_floor (sensitivity).
+               - **w ≤ T / n_required** — short enough that the fixed period T yields ≥ n_required buckets (stability).
+            - **Empty bracket = infeasible requirements**, not a bad width choice: relax Δ (accept bigger shifts), extend T (more history), or accept fewer buckets.
+            - **Busy feed:** r = 100 ev/min, T = 28 days = 40,320 min, λ_floor = 300, n_required = 300 → w ∈ [3, 134] min; pick w = 5 min → n = 8,064 buckets, λ = 500/bucket.
+            - **Quiet feed (infeasible):** r = 1 ev/min, T = 7 days = 10,080 min, λ_floor = 100, n_required = 200 → w ∈ [100, 50.4] → empty. Fix: extend T to 28 days (w ≤ 201 min) or relax λ_floor to 50.
 
-      </details>
-   -  <details>
-      <summary>Where λ_floor comes from — exact per-bucket detection power (no normal approximation)</summary>
+         </details>
+      -  <details>
+         <summary>Where λ_floor comes from — exact per-bucket detection power (no normal approximation)</summary>
 
-         - **The question:** at λ events/bucket, is a rate shift of fraction Δ detectable? It's a two-distribution separation question, answered with the exact ppf/CDF — the same machinery the limits use.
-         - **Healthy bucket:** X ~ Poisson(λ).
-         - **UCL** = the exact (1 − α/2)-quantile of the healthy distribution → `poisson.ppf(1 - alpha/2, λ)` (the very ppf used to draw the limits).
-         - **Shifted bucket:** X′ ~ Poisson(λ(1 + Δ)) — the rate moved by Δ.
-         - **Per-bucket detection power:** q(Δ; λ) = P(X′ > UCL) = 1 − F_{λ(1+Δ)}(UCL) — the shifted distribution's CDF evaluated at the healthy threshold.
-         - **The requirement:** choose a target per-bucket power **q\*** (0.5 = the "detectable" floor; 0.9 = strong). **λ_floor = the smallest λ with q(Δ; λ) ≥ q\***, read off the exact CDF. No normal anywhere.
-         - **Exact values (α = 0.001 per bucket, two-sided):**
+            - **The question:** at λ events/bucket, is a rate shift of fraction Δ detectable? It's a two-distribution separation question, answered with the exact ppf/CDF — the same machinery the limits use.
+            - **Healthy bucket:** X ~ Poisson(λ).
+            - **UCL** = the exact (1 − α/2)-quantile of the healthy distribution → `poisson.ppf(1 - alpha/2, λ)` (the very ppf used to draw the limits).
+            - **Shifted bucket:** X′ ~ Poisson(λ(1 + Δ)) — the rate moved by Δ.
+            - **Per-bucket detection power:** q(Δ; λ) = P(X′ > UCL) = 1 − F_{λ(1+Δ)}(UCL) — the shifted distribution's CDF evaluated at the healthy threshold.
+            - **The requirement:** choose a target per-bucket power **q\*** (0.5 = the "detectable" floor; 0.9 = strong). **λ_floor = the smallest λ with q(Δ; λ) ≥ q\***, read off the exact CDF. No normal anywhere.
+            - **Exact values (α = 0.001 per bucket, two-sided):**
 
-            | Δ | λ for q ≥ 0.5 | λ for q ≥ 0.9 |
-            |---|---|---|
-            | 10% | ≈1,130 | ≈2,180 |
-            | 20% | ≈295 | ≈570 |
-            | 30% | ≈135 | ≈265 |
-            | 50% | ≈52 | ≈105 |
+               | Δ | λ for q ≥ 0.5 | λ for q ≥ 0.9 |
+               |---|---|---|
+               | 10% | ≈1,130 | ≈2,180 |
+               | 20% | ≈295 | ≈570 |
+               | 30% | ≈135 | ≈265 |
+               | 50% | ≈52 | ≈105 |
 
-         - **Reading the table:** at λ ≈ 300 you catch a 20% shift in about half of buckets; at λ ≈ 570, in about 90% of them.
-         - **NB case:** same recipe with `nbinom.ppf` / `nbinom.cdf`, shifted mean λ(1 + Δ), same dispersion r — heavier dispersion (smaller r) needs more λ for the same q.
-         - **N-of-M note:** q is *per-bucket* power. A sustained shift across M buckets fires the run rule at far lower per-bucket q, so these λ_floor values are the honest single-bucket floor, and the run rule rides on top.
+            - **Reading the table:** at λ ≈ 300 you catch a 20% shift in about half of buckets; at λ ≈ 570, in about 90% of them.
+            - **NB case:** same recipe with `nbinom.ppf` / `nbinom.cdf`, shifted mean λ(1 + Δ), same dispersion φ — heavier dispersion (smaller φ) needs more λ for the same q.
+            - **N-of-M note:** q is *per-bucket* power. A sustained shift across M buckets fires the run rule at far lower per-bucket q, so these λ_floor values are the honest single-bucket floor, and the run rule rides on top.
 
-      </details>
+         </details>
+
+      -  <details>
+         <summary>Stage B — the overdispersion check and where n_required comes from (χ² analysis)</summary>
+
+            - **What this check decides:** Poisson (ρ = 1) or NB (ρ > 1) — the choice that fixes σ, hence UCL/LCL. It is made from the noisy ratio s²/λ̂ (relative error ≈ √(2/n)), so the decision needs formalizing.
+            - **ρ (rho) — the true variance-to-mean ratio:**
+               - ρ = σ²/λ.
+               - ρ = 1 ⟺ Poisson (variance = mean).
+               - ρ = 1 + λ/φ > 1 ⟺ NB (overdispersed).
+               - The baseline s²/λ̂ is the *sample estimate* of ρ.
+            - **ρ\* — the smallest overdispersion worth catching:**
+               - The threshold where NB's wider σ starts mattering for the limits (σ_NB = √(ρλ) vs σ_Poisson = √λ).
+               - ρ\* ≈ 1.5 → σ ~22% wider than Poisson — worth catching.
+               - Milder ρ (1.2–1.3) → σ only ~10–14% wider, and catching them costs far more buckets (n ≈ 300–500+) — usually not worth it.
+            - **1 − β — the power requirement:**
+               - The probability of NOT missing overdispersion ≥ ρ\*.
+               - E.g., 1 − β = 0.9 → accept a 10% miss rate.
+            - **α_disp — the false-alert tolerance:**
+               - The tolerated probability of declaring NB on a genuinely Poisson feed.
+               - E.g., α_disp = 0.05.
+            - **The index-of-dispersion statistic:**
+               - D = (n−1) · s²/λ̂, built from the n buckets.
+               - The test is one-sided: the variance can only be too big.
+            - **Its Poisson-ness (why χ² with n−1 degrees of freedom):**
+               - Under H₀ (Poisson): D ~ χ²_{n−1}.
+               - Reject Poisson when D > χ²_{n−1}(1−α_disp) — the rejection boundary:
+                  - **χ²_{n−1}(1−α_disp) is the (1−α_disp)-quantile of the χ²_{n−1} distribution** — function notation, not (1−α_disp) multiplied by χ². The parenthetical is a probability (the argument); the output is a point on the x-axis.
+                  - **It is the inverse CDF (a.k.a. quantile / percent-point function):** feed it a probability (1−α_disp), and it returns the x-axis value where the CDF reaches that probability — the value such that P(χ²_{n−1} ≤ value) = 1−α_disp, i.e., only α_disp of the mass lies above it (the same idea as `norm.ppf(1−α_disp)` for the normal).
+                  - **In code:** `from scipy.stats import chi2` → `critical = chi2.ppf(1 - alpha, n - 1)` (in R: `qchisq(1 - alpha, n - 1)`).
+                  - Reading the rule: reject Poisson if the measured D exceeds the value that a truly Poisson feed's D would exceed only α_disp of the time by pure chance.
+               - df = n−1, not n: λ̂ is estimated from the same data, costing one degree of freedom.
+            - **When ρ is detectable:**
+               - Under a true variance ratio ρ, the statistic scales: D ~ ρ · χ²_{n−1}.
+               - Power = P(χ²_{n−1} > c/ρ), with c = χ²_{n−1}(1−α_disp).
+               - Demanding power ≥ 1−β gives the detectability condition:
+                  - **ρ detectable ⟺ ρ ≥ χ²_{n−1}(1−α_disp) / χ²_{n−1}(β).**
+               - The ratio shrinks toward 1 as n grows — more buckets detect smaller ρ.
+            - **"Find the smallest n" → n_required:**
+               - For your chosen ρ\*: n_required = the smallest n with χ²_{n−1}(1−α_disp) / χ²_{n−1}(β) ≤ ρ\*.
+               - Exact values (α_disp = 0.05, power = 0.9):
+
+                  | n | smallest ρ you reliably catch |
+                  |---|---|
+                  | 30 | ≈ 2.15 |
+                  | 50 | ≈ 1.80 |
+                  | 100 | ≈ 1.51 |
+                  | 200 | ≈ 1.34 |
+                  | 300 | ≈ 1.27 |
+
+               - Reading: to catch ρ\* = 1.5, need n ≈ 100; ρ\* = 2, n ≈ 30–50; ρ\* = 1.3, n ≈ 300.
+               - This n_required then feeds the width bracket: **w ≤ T / n_required**.
+
+         </details>
 
 </details>
 
 <details>
 <summary>2. <strong>Collect the baseline:</strong> per-bucket counts from a period you <em>know</em> was healthy (no incidents, holidays, or deployments).</summary>
 
-   - **How many buckets (the non-seasonal answer):**
-       - The baseline needs *enough buckets* to estimate both λ and its spread, not a fixed span of calendar time.
-       - **~100 consecutive healthy buckets** is a safe default; a few hundred gives a tighter overdispersion check (below).
-       - Same count, different clock time by resolution: [exact times to be confirmed].
-       - The "4–8 weeks" figure only enters with seasonality (step 5), where its job is to give each time-slice several samples — *not* how many buckets a single λ needs.
+   - **How many buckets the baseline holds:** **n = T/w** — you collect every bucket the fixed period T contains at the width w you chose in step 1. **n_required** (Stage B's χ² analysis) is the *minimum*: picking w inside step 1's bracket guarantees n ≥ n_required, and usually you get more.
    - **Sequential, not cherry-picked:** the baseline must be one *contiguous* known-good period, not scattered buckets picked because they "look right" — that selection bias contaminates the baseline.
    - **"Healthiness" is external, not statistical:** you cannot detect "is this bucket healthy?" statistically before you have a baseline, because the baseline *defines* healthy. Healthiness comes from domain knowledge ("this was a good week"), a deployment timestamp, or "the first N buckets after a known-stable release" — not from the data itself.
    - **Interleaved health (b1,b2 good → b3–b6 bad → b7 good → b8–b9 bad → b10 good):** a single good bucket inside a bad run is noise, not recovery. Health is judged on a *run* (sustained deviation), not per-bucket — which is why step 6 uses "N of the last M," never a single blip.
@@ -198,22 +262,22 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
       - Poisson assumes *variance ≈ λ* — where "variance" means the **sample variance s²** of the *baseline* window's bucket counts (the same healthy stretch used for λ, **never the detection window**, which may contain the very anomaly you're hunting). 
       - **Compute the sample variance s² and λ, then compare them**: 
          - Check it: `[0, 0, 50, 0, 0]` has λ = 10 but s² = 400 (≫ λ): *one huge burst, mostly idle.* 
-         - When **s² / λ is clearly > 1** (say > 1.5–2), the process is burstier than Poisson allows; use the **negative binomial**, which adds a dispersion parameter `r` and has variance (sample variance) = λ + λ²/r > λ, so bursts are expected rather than anomalous. thus `r` can be found out.
-         - **Formulas** — Poisson: $P(X=k) = \frac{\lambda^k e^{-\lambda}}{k!}$; negative binomial: $P(X=k) = \binom{k+r-1}{k}\left(\frac{r}{r+\lambda}\right)^{r}\left(\frac{\lambda}{r+\lambda}\right)^{k}$. [See why this is doesn't look like the normal binomial PMF](#why-nb-looks-like-this)
+         - When **s² / λ is clearly > 1** (say > 1.5–2), the process is burstier than Poisson allows; use the **negative binomial**, which adds a dispersion parameter `φ` and has variance (sample variance) = λ + λ²/φ > λ, so bursts are expected rather than anomalous. thus `φ` can be found out.
+         - **Formulas** — Poisson: $P(X=k) = \frac{\lambda^k e^{-\lambda}}{k!}$; negative binomial: $P(X=k) = \binom{k+φ-1}{k}\left(\frac{φ}{φ+\lambda}\right)^{φ}\left(\frac{\lambda}{φ+\lambda}\right)^{k}$. [See why this is doesn't look like the normal binomial PMF](#why-nb-looks-like-this)
          - **Poisson = binomial limit (why $E[X] = np = \lambda$):** 
             - $X\sim\mathrm{Binomial}(n,p)$ with $p=\lambda/n$, $n\to\infty$. 
             - $E[X]=np=\lambda$ by linearity of expectation. The PMF converges: $\binom{n}{k}\sim n^k/k!$, $p^k=\lambda^k/n^k$, and $(1-\lambda/n)^{n-k}\to e^{-\lambda}$ (a $1^\infty$ form → take $\ln$ → $0/0$ → L'Hôpital), giving $P(X=k)=\lambda^k e^{-\lambda}/k!$. 
             - Holding $\lambda=np$ fixed keeps the expected count constant while trials $\to\infty$ and per-trial probability $\to 0$; $np\to 0$ → no events, $np\to\infty$ → Normal, only $np\to\lambda$ → Poisson.
-         - **Why the NB mean is $\lambda$ (not $np$):** the NB is a Gamma–Poisson mixture — $X\mid\Lambda\sim\mathrm{Poisson}(\Lambda)$ with $\Lambda\sim\mathrm{Gamma}(r,\ \text{mean }\lambda)$. Law of total expectation: $E[X]=E[\,E[X\mid\Lambda]\,]=E[\Lambda]=\lambda$. There's no $n\cdot p$ here — that identity belongs to the Binomial/Poisson; the NB's mean is just the average of the random rate.
-         - **Why the NB variance is $\lambda + \lambda^2/r$:** by the law of total variance, $\mathrm{Var}(X) = E[\mathrm{Var}(X\mid\Lambda)] + \mathrm{Var}(E[X\mid\Lambda])$. Since $\mathrm{Var}(X\mid\Lambda) = \Lambda$ (a Poisson's variance equals its mean) and $E[X\mid\Lambda] = \Lambda$, this gives $\mathrm{Var}(X) = E[\Lambda] + \mathrm{Var}(\Lambda) = \lambda + \lambda^2/r$. The $\lambda$ term is the Poisson noise; the $\lambda^2/r$ term is the spread of the fluctuating rate, which vanishes as $r\to\infty$ (Poisson).
+         - **Why the NB mean is $\lambda$ (not $np$):** the NB is a Gamma–Poisson mixture — $X\mid\Lambda\sim\mathrm{Poisson}(\Lambda)$ with $\Lambda\sim\mathrm{Gamma}(φ,\ \text{mean }\lambda)$. Law of total expectation: $E[X]=E[\,E[X\mid\Lambda]\,]=E[\Lambda]=\lambda$. There's no $n\cdot p$ here — that identity belongs to the Binomial/Poisson; the NB's mean is just the average of the random rate.
+         - **Why the NB variance is $\lambda + \lambda^2/φ$:** by the law of total variance, $\mathrm{Var}(X) = E[\mathrm{Var}(X\mid\Lambda)] + \mathrm{Var}(E[X\mid\Lambda])$. Since $\mathrm{Var}(X\mid\Lambda) = \Lambda$ (a Poisson's variance equals its mean) and $E[X\mid\Lambda] = \Lambda$, this gives $\mathrm{Var}(X) = E[\Lambda] + \mathrm{Var}(\Lambda) = \lambda + \lambda^2/φ$. The $\lambda$ term is the Poisson noise; the $\lambda^2/φ$ term is the spread of the fluctuating rate, which vanishes as $φ\to\infty$ (Poisson).
          - **Direct PMF derivation (the definition $E[X]=\sum_k k\,p(k)$ applied):**
             - **Binomial mean $=np$:** $E[X]=\sum_{k=0}^{n} k\binom{n}{k}p^k(1-p)^{n-k}$. Absorb the $k$ via $k\binom{n}{k}=n\binom{n-1}{k-1}$, factor out $np$, and the leftover sum is the binomial expansion $(p+(1-p))^{n-1}=1$, so $E[X]=np$.
             - **Poisson mean $=\lambda$:** $E[X]=e^{-\lambda}\sum_{k=1}^{\infty}\frac{k\,\lambda^k}{k!}=e^{-\lambda}\sum_{k=1}^{\infty}\frac{\lambda^k}{(k-1)!}$ (using $\frac{k}{k!}=\frac{1}{(k-1)!}$). Let $m=k-1$: $=e^{-\lambda}\,\lambda\sum_{m=0}^{\infty}\frac{\lambda^m}{m!}=e^{-\lambda}\,\lambda\,e^{\lambda}=\lambda$, where the sum is the Maclaurin series of $e^{\lambda}$.
             - **Poisson variance $=\lambda$:** compute $E[X(X-1)]$ instead of $E[X^2]$ because $\frac{k(k-1)}{k!}=\frac{1}{(k-2)!}$ cancels cleanly: $E[X(X-1)]=e^{-\lambda}\sum_{k=2}^{\infty}\frac{\lambda^k}{(k-2)!}=\lambda^2$. Then $E[X^2]=E[X(X-1)]+E[X]=\lambda^2+\lambda$, so $\mathrm{Var}(X)=(\lambda^2+\lambda)-\lambda^2=\lambda$.
-      - **How r is chosen:**
-         - *Method of moments* — equate the model variance to the observed sample variance, then solve for r: **r = λ² / (s² − λ)**.
-         - Valid only when **s² > λ** (r positive); s² ≈ λ → r → ∞ (Poisson); s² < λ → NB invalid.
-         - r is **fixed per baseline** (per time-slice with seasonality), like λ — not re-estimated per bucket.
+      - **How φ is chosen:**
+         - *Method of moments* — equate the model variance to the observed sample variance, then solve for φ: **φ = λ² / (s² − λ)**.
+         - Valid only when **s² > λ** (φ positive); s² ≈ λ → φ → ∞ (Poisson); s² < λ → NB invalid.
+         - φ is **fixed per baseline** (per time-slice with seasonality), like λ — not re-estimated per bucket.
       - **📌 TODO (drifting mean):** overdispersion has a second cause we're yet to discuss — a *drifting mean* inside the baseline window (slow growth or decline, not burstiness). That's a non-stationarity problem, not a dispersion problem: the fix is to shorten or detrend the baseline and re-estimate λ, not to switch distributions.
 
 </details>
@@ -227,10 +291,10 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
       - **UCL/LCL are the rejection region:** a count inside [LCL, UCL] *fails to reject* $H_0$ (treated as healthy — normal variation); a count crossing either limit *rejects* $H_0$ (flagged as a probable anomaly).
       - **What α is:** the tolerated false-alert rate — **α is the probability that a perfectly healthy bucket still lands beyond UCL/LCL purely by chance (hence the name *false-alarm alert*), because the healthy distribution itself has real tails.** α = 0.001 means "1 in 1,000 healthy buckets may false-alarm by pure chance."
    - **Set the limits from the fitted distribution's quantiles (ppf — no normal approximation):**
-      - **UCL** = the smallest integer $c$ such that $P(X \le c) = \sum_{k=0}^{c} \frac{\lambda^k e^{-\lambda}}{k!} \ge 1 - \frac{\alpha}{2}$ → in code: `poisson.ppf(1 - alpha/2, lam)` (Poisson) or `nbinom.ppf(1 - alpha/2, r, r/(r+lam))` (NB).
-      - **LCL** = the largest integer $c$ such that $P(X \le c-1) = \sum_{k=0}^{c-1} \frac{\lambda^k e^{-\lambda}}{k!} \le \frac{\alpha}{2}$ → in code: `poisson.ppf(alpha/2, lam)` (Poisson) or `nbinom.ppf(alpha/2, r, r/(r+lam))` (NB).
-      - These are the $\alpha/2$ and $1-\alpha/2$ **quantiles** of the fitted distribution — exact at every λ and r. (The $\lambda \pm k\sigma$ "3σ" form is only the pre-computer normal *approximation* to these quantiles at large λ, and is **not used** for the limits.)
-      - **The fitted distribution's spread (for reference):** σ = √λ for the Poisson; σ = √(λ + λ²/r) for the negative binomial.
+      - **UCL** = the smallest integer $c$ such that $P(X \le c) = \sum_{k=0}^{c} \frac{\lambda^k e^{-\lambda}}{k!} \ge 1 - \frac{\alpha}{2}$ → in code: `poisson.ppf(1 - alpha/2, lam)` (Poisson) or `nbinom.ppf(1 - alpha/2, φ, φ/(φ+lam))` (NB).
+      - **LCL** = the largest integer $c$ such that $P(X \le c-1) = \sum_{k=0}^{c-1} \frac{\lambda^k e^{-\lambda}}{k!} \le \frac{\alpha}{2}$ → in code: `poisson.ppf(alpha/2, lam)` (Poisson) or `nbinom.ppf(alpha/2, φ, φ/(φ+lam))` (NB).
+      - These are the $\alpha/2$ and $1-\alpha/2$ **quantiles** of the fitted distribution — exact at every λ and φ. (The $\lambda \pm k\sigma$ "3σ" form is only the pre-computer normal *approximation* to these quantiles at large λ, and is **not used** for the limits.)
+      - **The fitted distribution's spread (for reference):** σ = √λ for the Poisson; σ = √(λ + λ²/φ) for the negative binomial.
          - yes, sigma is quite literally the sample standard deviation for NB case.
       - UCL/LCL are the two boundaries of "normal variation": below LCL = abnormally few (drop / upstream break); above UCL = abnormally many (spike / retry storm).
 
@@ -245,14 +309,51 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 </details>
 
 <details>
-<summary>6. <strong>Pre-commit the trigger rule</strong> — never a single blip. The standard form is <strong>"N of the last M"</strong>: alert only if <em>at least N of the most recent M buckets</em> cross the limit in the same direction. A single crossing is expected by chance (that's what α quantifies); a <em>run</em> of crossings is not.</summary>
+<summary>6. <strong>Pre-commit the trigger rule</strong> — the rule (N, M) = G(α, Δ, w, λ, T_latency, F_false, δ); alert only if <em>at least N of the most recent M buckets</em> cross the limit in the same direction. A single crossing can occur by chance (that's what α quantifies); a <em>run</em> of crossings is not.</summary>
 
-   - **Two directions, two counters:** "crossing the limit" is *directional* — a bucket above UCL is a **spike**, a bucket below LCL is a **drop**, and they are different anomalies. Keep **two separate run counters** (one for `x > UCL`, one for `x < LCL`), each with its own N-of-M rule; never merge a spike and a drop into one "bad" flag, or a spike followed by a drop can masquerade as a run of a single anomaly.
+   - **New params this stage introduces:** 
+      - **M** (look-back window), **N** (trigger count — the deliverable), 
+      - **T_latency** (picked inside [T_min, T_max]), 
+      - **F_false** (tolerated false alerts per day), 
+      - **δ** (tolerated run-rule miss rate).
+   - **Borrowed from steps 1–5 (the rest of G):** α (false-alert rate, step 1/4), Δ and w (step 1), λ and q (steps 2–3 — q = per-bucket power at Δ), r (feed rate).
+   - **Two directions, two counters:** "crossing the limit" is *directional* — a bucket above UCL is a **spike**, a bucket below LCL is a **drop**, and they are different anomalies.  \
+   Keep **two separate run counters** (one for `x > UCL`, one for `x < LCL`), each with its own N-of-M rule; never merge a spike and a drop into one "bad" flag, or a spike followed by a drop can masquerade as a run of a single anomaly.
    - **Formally:** let $b_j \in \{0,1\}$ mark whether bucket $j$ crossed the limit in that direction. Alert when
      $$\sum_{j=i-M+1}^{i} b_j \;\geq\; N .$$
    - **Why it kills false alarms:** if each bucket independently false-alarms with probability $\alpha$, the chance that $N$ or more of $M$ buckets fire *by chance* is the binomial tail
      $$P(\text{false alert}) = \sum_{k=N}^{M} \binom{M}{k}\,\alpha^{k}\,(1-\alpha)^{M-k},$$
      which collapses as $N$ grows. At $\alpha = 0.001$, "5 of 7" false-alarms with probability $\approx 2.1 \times 10^{-14}$ — essentially never.
+   - **T_latency — a corridor, not a guess:**
+      - **T_min (physical resolution floor, no N needed):** a bucket must hold ≥ λ_floor events to even *see* a Δ shift → **T_min = w_min = λ_floor/r** (one minimal bucket — alerts are evaluated once per bucket, so you can't react faster than that). The run rule's own slowness (needs ~N buckets to fire) is *not* part of T_min — side 2's **M·w ≤ T_latency** enforces it after (N, M) are solved.
+      - **T_max (system ceilings, measurable):** min of [the intake buffer's](#intake-buffer) overflow time (K events ÷ r, the production rate), the retrain/feature-freshness window, and the replay/retention horizon.
+         - **K = the intake buffer's capacity** — the holding queue between producers and consumers ([what it is and why it's architecturally required](#intake-buffer)).
+         - Overflow scenario: consumers stall while producers keep producing at rate r → buffer fills in ≈ K/r → then events are dropped permanently.
+         - So K/r = *time until data loss* — detection must land before it. It's a hard ceiling because the buffer is architecture you don't control from the alerting code.
+      - **Workflow:** pick T_latency → check T_min ≤ T_latency ≤ T_max → set M ≤ T_latency/w → solve (N, M) from Sides 1 and 2 → side 2's M·w ≤ T_latency doubles as the "does the rule fire in time?" check; if no (N, M) satisfies both sides at your T_latency, raise T_latency and retry.
+   - **How (N, M) are actually fixed — two sides, both exact:**
+      - **Side 1 — false alarms must stay within budget (healthy feed):**
+         - Per-window chance that "N of M" fires *by chance* = binomial tail at α:
+     $$B_{\text{false}}(N, M, \alpha) = \sum_{k=N}^{M}\binom{M}{k}\alpha^{k}(1-\alpha)^{M-k}$$
+         - Requirement: B_false ≤ (false alarms tolerated per day) ÷ (buckets per day).
+         - Bigger N (or N close to M) → rarer false alarms.
+      - **Side 2 — a real sustained shift must be caught:**
+         - Once a shift has been present for ≥ M buckets, every bucket crosses with probability q.
+         - Chance the run rule fires = binomial tail at q:
+     $$B_{\text{true}}(N, M, q) = \sum_{k=N}^{M}\binom{M}{k}q^{k}(1-q)^{M-k}$$
+         - Requirement: B_true ≥ 1 − δ (e.g., ≥ 0.95).
+         - Latency cap: the run rule needs M buckets → **M·w ≤ T_latency**.
+   - **Worked example — real numbers to a range:**
+      - Feed rate **r = 1,000 ev/min** (per-bucket mean λ = r·w, i.e., 1,000 ev/bucket at w = 1 min); must catch Δ = 30% drop at q* = 0.5.
+      - Operational budgets: **F_false = 1 false alarm/day**; **δ = 0.05** → Side 2 must clear **B_true ≥ 1 − δ = 0.95**.
+      - Step 1's exact table: Δ = 30%, q ≥ 0.5 → λ_floor ≈ 135 ev/bucket (same unit as λ) → w_min = λ_floor/r ≈ 135/1000 ≈ 0.14 min ≈ 8 s.
+      - T_min = w_min ≈ 8 s (one minimal bucket — no N assumed).
+      - T_max = min(buffer overflow 45 min, retrain window 60 min) = 45 min.
+      - **T_latency ∈ [≈ 8 s, 45 min]** → pick 10 min.
+      - M ≤ T_latency/w = 10/1 → M ≤ 10 (with w = 1 min). Take M = 7.
+      - Side 1 (F_false = 1/day): α = 0.001 at 1,440 buckets/day → need B_false ≤ 1/1440 ≈ 7×10⁻⁴; "5 of 7" gives ≈ 2×10⁻¹⁴ ✓.
+      - Side 2 (δ = 0.05): at w = 1 min, λ per bucket = 1,000 → q(30%) ≈ 1 → B_true(5,7) ≈ 1 ≥ 0.95 ✓.
+      - Verdict: **w = 1 min, T_latency = 10 min, (N, M) = (5, 7)** — derived, not guessed.
    - **Walkthrough** ("5 of the last 7"; bad buckets are b3, b4, b5, b6, b8, b9):
      | At bucket | last 7 | bad count | alert? |
      |---|---|---|---|
@@ -265,18 +366,173 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 
 </details>
 
-**The judgment runbook.**
+---
+
+<details>
+<summary><strong>Worked example — the full chain: steps 1–6 to "when does the alert fire?"</strong></summary>
+
+
+- **Step 1 — Fix the window** (Stage A: λ_floor + bracket; Stage B: n_required).
+   - **Hyperparameters assumed:** **Δ = 30%** (smallest drop we must catch), **q\* = 0.5** (target per-bucket power), **α = 0.001** (per-bucket false-alert rate, two-sided), **ρ\* = 1.5** (smallest overdispersion worth catching).
+   - **Facts:** baseline period **T = 28 days = 40,320 min**; measured rate **r = 1,000 events/min** (E ≈ 40.3M events over T).
+   - λ_floor 
+      - from the exact power condition: the smallest λ s.t. per-bucket power q(Δ; λ) ≥ q*, where q(Δ; λ) = 1 − F_{λ(1+Δ)}(UCL)
+      - UCL = `poisson.ppf(1 − α/2, λ)`. 
+      - With Δ = 0.30, q* = 0.5, α = 0.001: **λ_floor ≈ 135 events/bucket**.
+   - `n_required` — from the Stage B power condition: the smallest n with χ²_{n−1}(1−α_disp)/χ²_{n−1}(β) ≤ ρ\* (α_disp = 0.05, β = 0.10 → 90% power). With ρ\* = 1.5: **n_required ≈ 100 buckets**.
+   - Bracket: `w ∈ [λ_floor/r, T/n_required]` = `[135/1000, 40320/100]` ≈ **`[0.14 min, 403 min]`**.
+   - **Choose w = 1 min** → per-bucket mean λ = r·w = 1,000 events/bucket.
+- **Step 2 — Collect the baseline.**
+   - No new hyperparameters — uses step 1's w and the facts.
+   - Buckets in the period: n = T/w = 40,320 ≥ n_required (100) ✓.
+   - One contiguous, known-healthy stretch (no incidents, holidays, or deployments).
+- **Step 3 — Model the bucket count** (Gamma–Poisson; the overdispersion check decides).
+   - From the baseline: **λ̂ ≈ 1,000 events/bucket** (sample mean); measure the sample variance s².
+   - Overdispersion check: assume s²/λ̂ ≈ 1.05 ≈ 1 → **stay Poisson** (had s²/λ̂ been > ~1.5, fit NB with φ = λ²/(s²−λ)).
+   - Fitted model: **Poisson(λ̂ = 1,000)** → σ = √λ̂ ≈ 31.6.
+- **Step 4 — Set the alert limits** (exact ppf — no normal approximation).
+   - **Hyperparameters assumed:** **α = 0.001** (carried from step 1).
+   - **UCL = poisson.ppf(1 − 0.001/2, 1,000) ≈ 1,104**; **LCL = poisson.ppf(0.001/2, 1,000) ≈ 896**.
+   - Meaning: a healthy bucket falls below LCL or above UCL with probability α/2 per side.
+- **Step 5 — Remove seasonality.**
+   - **Assumption: this feed has no time-of-day / day-of-week pattern** → one λ and one set of limits serve every bucket (step 5 is vacuous here).
+- **Step 6 — Pre-commit the trigger rule** ((N, M) = G(α, Δ, w, λ, T_latency, F_false, δ)).
+   - **Hyperparameters assumed:** **F_false = 1 false alarm/day**, **δ = 0.05** (catch a sustained shift with ≥ 95%).
+   - Corridor: **T_min = w_min = λ_floor/r ≈ 8 s**; **T_max = 45 min** (intake-buffer overflow, the binding ceiling) → **choose T_latency = 10 min**.
+   - **M ≤ T_latency/w = 10** → pick **M = 7**.
+   - Side 1 (false alarms): B_false(N, 7, 0.001) ≤ 1/1440 ≈ 7×10⁻⁴ → holds for N ≥ 2; pick **N = 5** for margin (B_false(5,7) ≈ 2×10⁻¹⁴).
+   - Side 2 (detection): at λ = 1,000/bucket a 30% drop trips almost every bucket (q ≈ 1) → B_true(5,7) ≈ 1 ≥ 0.95 ✓; and M·w = 7 min ≤ T_latency = 10 min ✓.
+   - **Committed rule: fire the alert when ≥ 5 of the last 7 buckets cross below LCL ≈ 896 (drop) or above UCL ≈ 1,104 (spike).**
+- **When the alert fires.**
+   - Live drop day: buckets land at ~150 events/min (≈ an 85% drop).
+   - Each is far below LCL (150 ≪ 896) → counts as a crossing.
+   - The fifth crossing makes it "5 of the last 7" → **the alert fires**.
+   - (What you do next — find the cause — is the judgment runbook below.)
+
+</details>
+
+<details>
+<summary><strong>Worked example — the overdispersed feed (NB forced)</strong></summary>
+
+
+- **Step 1 — Fix the window** (same requirement set as Example A).
+   - **Hyperparameters assumed:** **Δ = 30%**, **q\* = 0.5**, **α = 0.001**, **ρ\* = 1.5**; **facts:** **T = 28 days = 40,320 min**, **r = 1,000 events/min**.
+   - λ_floor ≈ 135 events/bucket; n_required ≈ 100; bracket ≈ [0.14 min, 403 min] → **choose w = 1 min** (λ = 1,000 events/bucket).
+- **Step 2 — Collect the baseline.**
+   - n = T/w = 40,320 buckets ≥ n_required (100) ✓; one contiguous, known-healthy stretch.
+- **Step 3 — Model the bucket count** (this is where Example B diverges).
+   - Observed from the baseline: **λ̂ ≈ 1,000 events/bucket**, but **s² ≈ 3,000** → s²/λ̂ = 3 ≫ 1.
+   - Index-of-dispersion: D = (n−1)·s²/λ̂ ≈ 40,319 × 3 ≈ 1.2×10⁵ ≫ χ²_{n−1}(0.95) → **reject Poisson**.
+   - **NB forced:** **φ̂ = λ̂²/(s² − λ̂) = 10⁶/2,000 = 500**; **σ = √(λ̂ + λ̂²/φ̂) = √3,000 ≈ 54.8** (Poisson's 31.6 would understate the spread).
+- **Step 4 — Set the alert limits** (quantiles of the NB, not the Poisson).
+   - **Hyperparameters assumed:** **α = 0.001** (carried from step 1).
+   - **UCL = nbinom.ppf(1 − α/2, φ̂, φ̂/(φ̂+λ̂)) ≈ 1,180**; **LCL ≈ 820** — versus Poisson's ≈ 1,104 / 896.
+   - Meaning: under NB, healthy bursts legitimately reach ≈ 1,180; the wider band is correct, not lax.
+- **Step 5 — Remove seasonality.**
+   - **Assumption: no day-of-week / hour pattern** → one model and one set of limits (vacuous here, as in Example A).
+- **Step 6 — Pre-commit the trigger rule** (same budgets, same solve as Example A).
+   - **Hyperparameters assumed:** **F_false = 1 false alarm/day**, **δ = 0.05**.
+   - Corridor: T_min ≈ 8 s; T_max = 45 min → **T_latency = 10 min** → **M ≤ 10 → M = 7**; Side 1 → **N = 5** ✓.
+   - Side 2: at a 30% drop under NB (shifted mean 700, σ ≈ 41) per-bucket q ≈ 0.998 → B_true(5,7) ≈ 1 ✓; M·w = 7 min ≤ 10 min ✓.
+   - **Committed rule: alert when ≥ 5 of the last 7 buckets cross below LCL ≈ 820 or above UCL ≈ 1,180.**
+- **Why the NB choice matters (live scenarios).**
+   - Normal burst bucket at 1,150: inside the NB band (1,150 < 1,180) → **silent** — the same bucket under Poisson's limits (UCL 1,104) would **false-alarm**.
+   - True drop to ~150: far below LCL (820) → "5 of the last 7" → **alert fires** (upstream break — the runbook's job).
+
+
+</details>
+
+#### Hyperparameter dependency graph
+
+```mermaid
+flowchart TB
+    subgraph FACTS["Facts — measured / given"]
+        E["E: total events in period"]
+        T["T: baseline period duration"]
+        BUF["buffer K, retrain window, replay horizon"]
+    end
+
+    subgraph REQ["Step 1 — requirements you choose"]
+        D["Δ: smallest shift to catch"]
+        QS["q*: target per-bucket power"]
+        A["α: per-bucket false-alert rate"]
+        R["ρ*: overdispersion to catch"]
+        B["β: dispersion-test miss rate"]
+    end
+
+    subgraph S1["Step 1 — derived (Stages A & B)"]
+        LF["λ_floor"]
+        NR["n_required"]
+        W["w: bucket width"]
+    end
+
+    subgraph S234["Steps 2–4 — baseline → model → limits"]
+        NB["n = T/w baseline buckets"]
+        MODEL["fitted model: Poisson or NB (λ̂, φ̂, σ)"]
+        LIM["UCL / LCL — exact ppf quantiles"]
+    end
+
+    subgraph S6["Step 6 — trigger rule"]
+        TMN["T_min = w_min = λ_floor/r"]
+        TMX["T_max"]
+        TL["T_latency"]
+        MM["M"]
+        QQ["q: per-bucket power at Δ"]
+        FB["F_false , δ"]
+        NN["N"]
+        RULE["rule: ≥ N of last M cross the limit"]
+    end
+
+    RATE["r = E/T"]
+
+    E --> RATE
+    T --> RATE
+    D --> LF
+    QS --> LF
+    A --> LF
+    R --> NR
+    B --> NR
+    LF --> W
+    RATE --> W
+    NR --> W
+    T --> W
+    W --> NB
+    NR --> NB
+    NB --> MODEL
+    MODEL --> LIM
+    A --> LIM
+    LF --> TMN
+    RATE --> TMN
+    BUF --> TMX
+    TMN --> TL
+    TMX --> TL
+    TL --> MM
+    W --> MM
+    D --> QQ
+    MODEL --> QQ
+    MM --> NN
+    A --> NN
+    QQ --> NN
+    FB --> NN
+    MM --> RULE
+    NN --> RULE
+    LIM --> RULE
+    RULE --> ALERT["alert fires"]
+```
+
+Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so one model serves every bucket.
+
+---
+
+#### The judgment runbook.
 1. Note direction (drop/spike), the window, and how many buckets tripped.
 2. Check for a known cause first (deployment, maintenance, marketing, holiday).
 3. Drop → look upstream (producer lag, queue depth, feed errors); spike → look for duplicates (repeated row IDs, one source IP/user-agent).
 4. Confirm on raw counts, record the cause, and re-baseline if the shift is a *permanent* level change.
 
-**Worked example.** 
-- Monday-2pm baseline λ = 1,000/min, so σ ≈ 31.6 and the limits are ≈ 1,095 (upper) and ≈ 905 (lower). 
-- Five consecutive 2pm buckets sit at ~150 → drop alert. 
-- Human: the card-network consumer lag is climbing → the upstream producer stopped → cascading failure, not a model problem.
+---
 
-**Re-baselining after a permanent level shift.** 
+#### Re-baselining after a permanent level shift.** 
 - The core principle: **never re-baseline on volume alone** — a genuine level shift and a disguised raid (bot raid causing higher-than-usual event-volume) look identical on the volume meter (both are "sustained high"). 
 - The discriminator is a *second signal*: genuine growth preserves *composition*; a raid distorts it.
 
@@ -420,62 +676,62 @@ The goal: leave this module able to say, for any bad row that *could* reach your
 **Why Gamma, specifically.** 
 - The rate Λ must be
    - **non-negative** — Gamma lives on $(0, \infty)$
-   - able to express **how much it fluctuates** — the shape parameter $r$ does exactly that (large $r$ → rate tightly pinned → near-Poisson; small $r$ → rate swings wildly → bursts)
+   - able to express **how much it fluctuates** — the shape parameter $φ$ does exactly that (large $φ$ → rate tightly pinned → near-Poisson; small $φ$ → rate swings wildly → bursts)
    - the **conjugate prior** for a Poisson rate — begin with a Gamma belief about the rate, observe Poisson data, and the posterior is still Gamma. 
 - That conjugacy is the mathematical reason Gamma is the natural choice.
 
-**The derivation — integrate the Poisson over the random rate.** Let $\Lambda \sim \mathrm{Gamma}(\text{shape } r,\ \text{scale } \theta)$, whose density is
+**The derivation — integrate the Poisson over the random rate.** Let $\Lambda \sim \mathrm{Gamma}(\text{shape } φ,\ \text{scale } \theta)$, whose density is
 
-$$f(\lambda') = \frac{\lambda'^{\,r-1} e^{-\lambda'/\theta}}{\theta^{\,r}\,\Gamma(r)}, \qquad \text{mean} = r\theta.$$
+$$f(\lambda') = \frac{\lambda'^{\,φ-1} e^{-\lambda'/\theta}}{\theta^{\,φ}\,\Gamma(φ)}, \qquad \text{mean} = φ\theta.$$
 
-Force the mean to be λ by setting $\theta = \lambda/r$ (so $\mathrm{Var}(\Lambda) = r\theta^2 = \lambda^2/r$). Mix the Poisson PMF over this Gamma:
+Force the mean to be λ by setting $\theta = \lambda/φ$ (so $\mathrm{Var}(\Lambda) = φ\theta^2 = \lambda^2/φ$). Mix the Poisson PMF over this Gamma:
 
-$$P(X=k) = \int_0^\infty \frac{\lambda'^{\,k} e^{-\lambda'}}{k!} \cdot \frac{\lambda'^{\,r-1} e^{-\lambda'/\theta}}{\theta^{\,r}\,\Gamma(r)}\, d\lambda'.$$
+$$P(X=k) = \int_0^\infty \frac{\lambda'^{\,k} e^{-\lambda'}}{k!} \cdot \frac{\lambda'^{\,φ-1} e^{-\lambda'/\theta}}{\theta^{\,φ}\,\Gamma(φ)}\, d\lambda'.$$
 
 Combine the exponentials and pull the constants out:
 
-$$P(X=k) = \frac{1}{k!\,\theta^{\,r}\,\Gamma(r)} \int_0^\infty \lambda'^{\,k+r-1}\, e^{-\lambda'(1 + 1/\theta)}\, d\lambda'.$$
+$$P(X=k) = \frac{1}{k!\,\theta^{\,φ}\,\Gamma(φ)} \int_0^\infty \lambda'^{\,k+φ-1}\, e^{-\lambda'(1 + 1/\theta)}\, d\lambda'.$$
 
-The integral is a standard Gamma integral, $\int_0^\infty x^{a-1} e^{-bx}\,dx = \Gamma(a)/b^{a}$, with $a = k+r$ and $b = 1 + 1/\theta$:
+The integral is a standard Gamma integral, $\int_0^\infty x^{a-1} e^{-bx}\,dx = \Gamma(a)/b^{a}$, with $a = k+φ$ and $b = 1 + 1/\theta$:
 
-$$P(X=k) = \frac{1}{k!\,\theta^{\,r}\,\Gamma(r)} \cdot \frac{\Gamma(k+r)}{(1 + 1/\theta)^{\,k+r}} = \frac{\Gamma(k+r)}{\Gamma(r)\,k!} \left(\frac{1}{1+\theta}\right)^{r} \left(\frac{\theta}{1+\theta}\right)^{k}.$$
+$$P(X=k) = \frac{1}{k!\,\theta^{\,φ}\,\Gamma(φ)} \cdot \frac{\Gamma(k+φ)}{(1 + 1/\theta)^{\,k+φ}} = \frac{\Gamma(k+φ)}{\Gamma(φ)\,k!} \left(\frac{1}{1+\theta}\right)^{φ} \left(\frac{\theta}{1+\theta}\right)^{k}.$$
 
-Substitute $\theta = \lambda/r$, so $\frac{1}{1+\theta} = \frac{r}{r+\lambda}$ and $\frac{\theta}{1+\theta} = \frac{\lambda}{r+\lambda}$:
+Substitute $\theta = \lambda/φ$, so $\frac{1}{1+\theta} = \frac{φ}{φ+\lambda}$ and $\frac{\theta}{1+\theta} = \frac{\lambda}{φ+\lambda}$:
 
-$$P(X=k) = \frac{\Gamma(k+r)}{\Gamma(r)\,k!} \left(\frac{r}{r+\lambda}\right)^{r} \left(\frac{\lambda}{r+\lambda}\right)^{k},$$
+$$P(X=k) = \frac{\Gamma(k+φ)}{\Gamma(φ)\,k!} \left(\frac{φ}{φ+\lambda}\right)^{φ} \left(\frac{\lambda}{φ+\lambda}\right)^{k},$$
 
-which is the negative-binomial PMF. Its variance $\lambda + \lambda^2/r$ then follows by the law of total variance (derived in the main text).
+which is the negative-binomial PMF. Its variance $\lambda + \lambda^2/φ$ then follows by the law of total variance (derived in the main text).
 
-**Simplify to the binomial form.** The Γ ratio is just a binomial coefficient — $\frac{\Gamma(k+r)}{\Gamma(r)\,k!} = \binom{k+r-1}{k}$ — so the same PMF is
+**Simplify to the binomial form.** The Γ ratio is just a binomial coefficient — $\frac{\Gamma(k+φ)}{\Gamma(φ)\,k!} = \binom{k+φ-1}{k}$ — so the same PMF is
 
-$$P(X=k) = \binom{k+r-1}{k} \left(\frac{r}{r+\lambda}\right)^{r} \left(\frac{\lambda}{r+\lambda}\right)^{k}.$$
+$$P(X=k) = \binom{k+φ-1}{k} \left(\frac{φ}{φ+\lambda}\right)^{φ} \left(\frac{\lambda}{φ+\lambda}\right)^{k}.$$
 
-Define $p = \frac{r}{r+\lambda}$ (so $1-p = \frac{\lambda}{r+\lambda}$) and this is the familiar binomial shape:
+Define $p = \frac{φ}{φ+\lambda}$ (so $1-p = \frac{\lambda}{φ+\lambda}$) and this is the familiar binomial shape:
 
-$$P(X=k) = \binom{k+r-1}{k}\, p^{r}\,(1-p)^{k}.$$
+$$P(X=k) = \binom{k+φ-1}{k}\, p^{φ}\,(1-p)^{k}.$$
 
 That's the binomial's mirror image — the same $C \cdot p^{\#} \cdot (1-p)^{\#}$ skeleton with the roles swapped:
 
 - **Binomial** fixes the number of trials $n$ and counts successes: $\binom{n}{k} p^k (1-p)^{n-k}$, range $0 \le k \le n$ (bounded).
-- **Negative binomial** fixes the number of successes $r$ and counts failures: $\binom{k+r-1}{k} p^r (1-p)^k$, range $k \ge 0$ (unbounded).
+- **Negative binomial** fixes the number of successes $φ$ and counts failures: $\binom{k+φ-1}{k} p^φ (1-p)^k$, range $k \ge 0$ (unbounded).
 
-(Note: $\binom{k+r-1}{k}$ is only a literal combination when $r$ is a whole number; our estimated $r$ is usually fractional, in which case the Γ form above is the technically correct one and the binomial-coefficient form is the readable shorthand.)
+(Note: $\binom{k+φ-1}{k}$ is only a literal combination when $φ$ is a whole number; our estimated $φ$ is usually fractional, in which case the Γ form above is the technically correct one and the binomial-coefficient form is the readable shorthand.)
 
 **Why the formula looks like this (the waiting-time reading).**<a href="why-nb-looks-like-this"></a>
-- The binomial-shape form $\binom{k+r-1}{k}\,p^r(1-p)^k$ has a concrete combinatorial meaning. 
-- Flip a coin with success probability $p$ until $r$ successes accumulate, and let $X$ be the number of failures before the $r$-th success. 
+- The binomial-shape form $\binom{k+φ-1}{k}\,p^φ(1-p)^k$ has a concrete combinatorial meaning. 
+- Flip a coin with success probability $p$ until $φ$ successes accumulate, and let $X$ be the number of failures before the $φ$-th success. 
 - Then $P(X=k)$ decomposes piece by piece:
-   - $\binom{k+r-1}{k}$ — the number of *orderings* of the first $k+r-1$ trials, which hold $k$ failures and $r-1$ successes in any order.
-   - $p^r$ — the $r$ successes (each contributes a factor $p$).
+   - $\binom{k+φ-1}{k}$ — the number of *orderings* of the first $k+φ-1$ trials, which hold $k$ failures and $φ-1$ successes in any order.
+   - $p^φ$ — the $φ$ successes (each contributes a factor $p$).
    - $(1-p)^k$ — the $k$ failures (each contributes a factor $1-p$).
 
-**The crucial subtlety — why $k+r-1$, not $k+r$.**
-- The final trial is *forced* to be a success (it is the $r$-th success, the one that triggers stopping), so it carries no combinatorial freedom. 
-- Only the first $k+r-1$ trials are free to be arranged, and the last one is pinned — which is exactly why the coefficient is over $k+r-1$ slots rather than $k+r$.
+**The crucial subtlety — why $k+φ-1$, not $k+φ$.**
+- The final trial is *forced* to be a success (it is the $φ$-th success, the one that triggers stopping), so it carries no combinatorial freedom. 
+- Only the first $k+φ-1$ trials are free to be arranged, and the last one is pinned — which is exactly why the coefficient is over $k+φ-1$ slots rather than $k+φ$.
 
 **Concrete example.** 
-- $r=2$ successes, $p=\frac{1}{2}$, $P(X=3)$ = "3 failures before the 2nd success." 
-- The run must end in a success; the 4 prior trials ($k+r-1 = 3+2-1 = 4$) hold 3 failures and 1 success, in $\binom{4}{3}=4$ orders: `FFFS`, `FFSF`, `FSFF`, `SFFF`. 
+- $φ=2$ successes, $p=\frac{1}{2}$, $P(X=3)$ = "3 failures before the 2nd success." 
+- The run must end in a success; the 4 prior trials ($k+φ-1 = 3+2-1 = 4$) hold 3 failures and 1 success, in $\binom{4}{3}=4$ orders: `FFFS`, `FFSF`, `FSFF`, `SFFF`. 
 - Each order contributes $(1/2)^3(1/2)^1$ for the first four, times $(1/2)$ for the final success, so
 - $$P(X=3) = \binom{4}{3}\cdot\left(\frac{1}{2}\right)^{2}\cdot\left(\frac{1}{2}\right)^{3} = 4\cdot\frac{1}{4}\cdot\frac{1}{8} = \frac{1}{8}.$$
 
