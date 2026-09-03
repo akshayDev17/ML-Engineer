@@ -667,13 +667,17 @@ flowchart TB
              - Re-baselining is only ever the battery's confirmation-gated conclusion, never the response to an alert alone.
           - *Serial independence:* the lag-1 autocorrelation $\hat r_1$ of the candidate window's bucket counts must stay inside the band $|\hat r_1| \le 2/\sqrt{n}$ (≈ the 95% band under independence). A replay or backlog drain violates it: buckets alternate near 0 and far above $\hat\lambda$, giving $\hat r_1 \gg 2/\sqrt{n}$.
           </details>
-      - **(c) Early-vs-late stationarity** — split $[t_0,\, t_0+H)$ into thirds.
+      - <details>
+          <summary><strong>(c) Early-vs-late stationarity</strong></summary>
 
-        | observed shape | early vs late thirds | reading | verdict |
-        |---|---|---|---|
-        | flat at a new level | ≈ (and both ≠ λ_old) | a *step* — settled plateau | (c) passes → with (a),(b),(d): re-baseline |
-        | rising then reverting | ≠, late drifting back toward λ_old | a *pulse* — transient that's ending | wait, do not re-baseline |
-        | keeps drifting | ≠, no reversion (ramp up or down) | *not settled* — still moving | not a level → defer, don't re-baseline |
+          split $[t_0,\, t_0+H)$ into thirds.
+
+          | observed shape | early vs late thirds | reading | verdict |
+          |---|---|---|---|
+          | flat at a new level | ≈ (and both ≠ λ_old) | a *step* — settled plateau | (c) passes → with (a),(b),(d): re-baseline |
+          | rising then reverting | ≠, late drifting back toward λ_old | a *pulse* — transient that's ending | wait, do not re-baseline |
+          | keeps drifting | ≠, no reversion (ramp up or down) | *not settled* — still moving | not a level → defer, don't re-baseline |
+          </details>
       - **(d) Level significance vs. $\lambda_{\text{old}}$** — $\hat\lambda_{\text{cand}}$ must differ from $\lambda_{\text{old}}$ beyond the pre-committed significance. In practice this is nearly always satisfied once the alarm has stayed live for $H$; (a)–(c) are the real discriminators.
    - **Step 4 — all pass → re-baseline.** Estimate $\hat\lambda_{\text{new}}$ = the mean of the stable confirmation window, **excluding the transition buckets**. Then re-run the module's baseline discipline on the new level, exactly as for the original: same window discipline (enough buckets — ≥ n_required), refit the model (the overdispersion check decides Poisson vs NB), recompute the limits at the same α with **exact ppf** (no normal approximation), and re-commit the (N, M) rule from the same budgets (F_false, δ, T_latency) — nothing left to runtime judgment. **Archive the old baseline**, and log the re-baseline event — old λ̂, new λ̂, timestamp $t_0 + H$, which tests passed — so the decision is reversible and auditable.
    - **Step 5 — any fail → do not re-baseline.** Treat it as an incident: investigate (vendor status page; our-side changes: contract tier, purchased SKUs/endpoints, consumer-side changes), keep the old baseline live so the alarm keeps firing. When the rate reverts, the alarm stops — and nothing was baked into "normal".
