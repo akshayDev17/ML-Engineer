@@ -524,6 +524,154 @@ Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so 
 
 ---
 
+#### The same graph, with the code that computes each sink (edge weights)
+
+- **What an edge's weight is.** The dependency graph above shows *which* node feeds *which*. Each arrow also hides a derivation: the sink's value is *computed* from its source(s), and the shortest Python that does that computation is the edge's **weight**.
+- **Why the weight becomes a node, not a label.** A sink with a single source (T_max ← buffer facts) could carry its code on that one edge. A sink with several sources cannot: its code must jointly consume *all* incoming edges, so the code sits as an **intermediate segment node** — it acts as the sink of the incoming edges — and one edge then runs from the segment to the real sink node. The companion diagram below draws exactly that: source → code segment → sink.
+- **Notation.** The code uses ASCII names (`lam_floor`, `alpha`, `delta` = the Δ shift, `qstar`, `rho_star`, `beta`, `n_req`, `lam_hat`, `phi`, `F_false`) — Greek letters and hats are not dependable identifiers — mapping one-to-one onto the graph's symbols. Prelude, counted once: `from itertools import count`; `from scipy.stats import poisson, nbinom, chi2, binom`; fixed constant **α_disp = 0.05**. Every limit/power snippet is the exact ppf/CDF machinery from steps 1–4 — no normal approximation anywhere.
+- **Closed forms — one line each:**
+   - **r ← E, T** — `r = E / T` (mean rate).
+   - **λ_floor ← Δ, q*, α** — `lam_floor = next(lam for lam in count(1) if 1 - poisson.cdf(poisson.ppf(1 - alpha/2, lam), lam*(1 + delta)) >= qstar)` — the exact-power scan behind the table: q(Δ; λ) = 1 − F_{λ(1+Δ)}(UCL), the first λ reaching q*; same recipe on `nbinom` for the NB case.
+   - **n_required ← ρ*, β** — `n_req = next(n for n in count(2) if chi2.ppf(1 - alpha_disp, n - 1) / chi2.ppf(beta, n - 1) <= rho_star)` — the χ² power scan (df = n−1, so the scan starts at n = 2).
+   - **n ← T, w** — `n = T // w` — the "≥ n_required" guarantee needs no code: step 1's bracket (w ≤ T/n_required) built it in.
+   - **T_min ← λ_floor, r** — `T_min = lam_floor / r`.
+   - **T_max ← buffer facts (K, retrain window, replay horizon)** — `T_max = min(K / r, retrain_window, replay_horizon)`.
+   - **limits ← model, α** — `LCL, UCL = poisson.ppf((alpha/2, 1 - alpha/2), lam_hat)`; NB: `LCL, UCL = nbinom.ppf((alpha/2, 1 - alpha/2), phi, phi/(phi + lam_hat))`.
+   - **q ← model, Δ** — spike: `q = 1 - poisson.cdf(UCL, lam_hat*(1 + delta))`; drop: `q = poisson.cdf(LCL - 1, lam_hat*(1 - delta))`; NB uses the same calls on `nbinom` with p = φ/(φ + shifted mean). *q needs UCL, so α rides into this code implicitly* — the companion diagram adds the edge A → q-segment that the dependency graph left implicit.
+- **Model fit ← baseline buckets** — the overdispersion decision in two lines:
+   ```
+   s2 = var(bucket_counts); lam_hat = mean(bucket_counts)
+   fit = NB(phi=lam_hat**2/(s2 - lam_hat)) \
+         if (n-1)*s2/lam_hat > chi2.ppf(1 - alpha_disp, n - 1) else Poisson(lam_hat)
+   ```
+- **Rule ← M, N, limits** — one counter per direction, never merged:
+   ```
+   spike = sum(x > UCL for x in last_M) >= N
+   drop  = sum(x < LCL for x in last_M) >= N
+   alert = spike or drop
+   ```
+   (alert ← rule is the identity `if alert: fire()`, so the companion diagram keeps that last edge plain.)
+- **The picks — code is a constraint, not a closed form** (these sinks are *chosen* inside a computed corridor):
+   - **w ← λ_floor, r, n_required, T** — `w_lo, w_hi = lam_floor / r, T / n_req`, then choose `w = T / n` for an integer n in `[n_req, int(r*T/lam_floor)]`.
+   - **T_latency ← T_min, T_max** — `assert T_min <= T_latency <= T_max`, then pick inside the corridor (Example A: 10 min).
+   - **M ← T_latency, w** — pick an integer ≤ `int(T_latency // w)`.
+   - **N ← M, α, q, F_false, δ** — Side 1 fixes the floor, Side 2 the ceiling:
+      ```
+      bpd = (24*60) // w                          # buckets per day, w in minutes
+      N = next(k for k in range(1, M + 1)         # Side 1 → N_lo
+               if binom.sf(k - 1, M, alpha) <= F_false / bpd)
+      assert binom.sf(N - 1, M, q) >= 1 - delta and M * w <= T_latency   # Side 2
+      ```
+      Side 2's buckets-per-day needs w — another implicit dependency the companion diagram draws (W → N-segment). The worked example's N = 5 sits *above* N_lo = 2 (Side 1 already clears at N ≥ 2): a margin choice, exactly as step 6 states.
+- **Companion diagram** — the same graph with a code segment inserted on every arrow path; the segment's label *is* the shortest snippet above (≤ and ≥ stand in for < and > so the labels parse cleanly):
+
+```mermaid
+flowchart TB
+    subgraph FACTS["Facts — measured / given"]
+        E["E: total events in period"]
+        T["T: baseline period duration"]
+        BUF["buffer K, retrain window, replay horizon"]
+    end
+
+    subgraph REQ["Step 1 — requirements you choose"]
+        D["Δ: smallest shift to catch"]
+        QS["q*: target per-bucket power"]
+        A["α: per-bucket false-alert rate"]
+        R["ρ*: overdispersion to catch"]
+        B["β: dispersion-test miss rate"]
+    end
+
+    subgraph S1["Step 1 — derived (Stages A & B)"]
+        CR["r = E / T"]
+        RATE["r"]
+        CLF["lam_floor = next(lam for lam in count(1) if 1 - poisson.cdf(poisson.ppf(1 - alpha/2, lam), lam*(1 + delta)) ≥ qstar)"]
+        LF["λ_floor"]
+        CNR["n_req = next(n for n in count(2) if chi2.ppf(1 - alpha_disp, n-1) / chi2.ppf(beta, n-1) ≤ rho_star)"]
+        NR["n_required"]
+        CW["w_lo, w_hi = lam_floor / r, T / n_req; pick w = T / n in the bracket"]
+        W["w"]
+    end
+
+    subgraph S234["Steps 2–4 — baseline → model → limits"]
+        CNB["n = T // w — ≥ n_req built in"]
+        NB["n = T/w baseline buckets"]
+        CMODEL["fit = NB(phi = lam_hat**2/(s2 - lam_hat)) if (n-1)*s2/lam_hat > chi2.ppf(1 - alpha_disp, n-1) else Poisson(lam_hat)"]
+        MODEL["fitted model: Poisson or NB (λ̂, φ̂, σ)"]
+        CLIM["LCL, UCL = dist.ppf((alpha/2, 1 - alpha/2)) — fitted Poisson or NB"]
+        LIM["UCL / LCL — exact ppf quantiles"]
+    end
+
+    subgraph S6["Step 6 — trigger rule"]
+        CTMN["T_min = lam_floor / r"]
+        TMN["T_min"]
+        CTMX["T_max = min(K / r, retrain_window, replay_horizon)"]
+        TMX["T_max"]
+        CTL["assert T_min ≤ T_latency ≤ T_max; pick inside"]
+        TL["T_latency"]
+        CMM["pick M ≤ int(T_latency // w)"]
+        MM["M"]
+        CQQ["q = 1 - poisson.cdf(UCL, lam_hat*(1 + delta)) or poisson.cdf(LCL - 1, lam_hat*(1 - delta))"]
+        QQ["q"]
+        FB["F_false , δ"]
+        CNN["bpd = (24*60)//w; N = next(k for k in 1..M if binom.sf(k-1, M, alpha) ≤ F_false/bpd); assert binom.sf(N-1, M, q) ≥ 1 - delta and M*w ≤ T_latency"]
+        NN["N"]
+        CRULE["spike = sum(x > UCL for last M) ≥ N; drop = sum(x < LCL for last M) ≥ N; alert = spike or drop"]
+        RULE["rule: ≥ N of last M cross the limit"]
+    end
+
+    E --> CR
+    T --> CR
+    CR --> RATE
+    D --> CLF
+    QS --> CLF
+    A --> CLF
+    CLF --> LF
+    R --> CNR
+    B --> CNR
+    CNR --> NR
+    LF --> CW
+    RATE --> CW
+    NR --> CW
+    T --> CW
+    CW --> W
+    W --> CNB
+    NR --> CNB
+    CNB --> NB
+    NB --> CMODEL
+    CMODEL --> MODEL
+    MODEL --> CLIM
+    A --> CLIM
+    CLIM --> LIM
+    LF --> CTMN
+    RATE --> CTMN
+    CTMN --> TMN
+    BUF --> CTMX
+    CTMX --> TMX
+    TMN --> CTL
+    TMX --> CTL
+    CTL --> TL
+    TL --> CMM
+    W --> CMM
+    CMM --> MM
+    D --> CQQ
+    MODEL --> CQQ
+    A --> CQQ
+    CQQ --> QQ
+    MM --> CNN
+    A --> CNN
+    QQ --> CNN
+    FB --> CNN
+    W --> CNN
+    CNN --> NN
+    MM --> CRULE
+    NN --> CRULE
+    LIM --> CRULE
+    CRULE --> RULE
+    RULE --> ALERT["alert fires"]
+```
+
+---
+
 #### The judgment runbook.
 1. Note direction (drop/spike), the window, and how many buckets tripped.
 2. Check for a known cause first (deployment, maintenance, marketing, holiday).
