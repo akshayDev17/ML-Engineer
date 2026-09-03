@@ -586,7 +586,9 @@ flowchart TB
 
 - **The one-line rule.** Re-baseline only when (a) CUSUM confirms a sustained shift, (b) the volume-to-breadth ratio is stable, (c) composition PSI < 0.25, and (d) business signals corroborate — and estimate $\lambda_{\text{new}}$ from a stable confirmation window, never from the transition itself.
 
-- **User identity-blind upstream (a proprietary feed we are a customer of): structural confirmation.** 
+<details>
+<summary><strong>User identity-blind upstream (a proprietary feed we are a customer of): structural confirmation</strong></summary>
+
    - When the events carry no identity we can see: not privy to the sign-ups or the user activity on the vendor's side that raised the stream's frequency — all we observe is that the frequency increased.
    - **Why permanence is only *confirmed*, never detected at onset.** The algorithm never decides permanent baseline shift at onset; it waits a pre-committed **confirmation horizon H** and then tests whether the new level *holds* and *looks like the same process*. 
       - Re-baselining early is the only expensive mistake (it bakes the anomaly into "normal" and silences future alarms for the same cause); re-baselining late only costs repeated alerts. \
@@ -678,13 +680,77 @@ flowchart TB
           | rising then reverting | ≠, late drifting back toward λ_old | a *pulse* — transient that's ending | wait, do not re-baseline |
           | keeps drifting | ≠, no reversion (ramp up or down) | *not settled* — still moving | not a level → defer, don't re-baseline |
           </details>
-      - **(d) Level significance vs. $\lambda_{\text{old}}$** — $\hat\lambda_{\text{cand}}$ must differ from $\lambda_{\text{old}}$ beyond the pre-committed significance. In practice this is nearly always satisfied once the alarm has stayed live for $H$; (a)–(c) are the real discriminators.
+      - <details>
+          <summary><strong>(d) Level significance vs. $\lambda_{\text{old}}$</strong></summary>
+
+          a formality, not a new test. The alarm staying live through $H$ (step 2) already certifies the level difference at the alert machinery's pre-committed budgets: an unchanged baseline sustains an N-of-M alarm at most $F_{\text{false}}$/day (side 1), so a live alarm at $t_0 + H$ means $\hat\lambda_{\text{cand}}$ differs from $\lambda_{\text{old}}$ beyond what $\alpha$, $F_{\text{false}}$ and $\delta$ permit by chance. No new threshold is set here; (a)–(c) are the real discriminators.
+
+          - **What "stays live through H" means in real time.** The N-of-M rule is evaluated on a sliding window: at every new bucket the window shifts by one and the rule re-checks "did ≥ N of the last M buckets cross?" — so the alarm is not one evaluation but a *state* that must hold across the whole horizon.
+          - **Evaluations, not episodes.** With M = 10, w = 1 min, H = 1 day the rule runs once per minute, giving $H/w - M + 1 = 1{,}440 - 10 + 1 = 1{,}431$ full-window checks over the horizon. A genuine sustained shift makes the rule evaluate TRUE at (essentially) every one of them — yet it is **one alert episode, not 1,431 alerts**: the notification fires once at the first trip and stays live until the condition clears (re-notifying per evaluation would be spam).
+          - **Isolated false evaluations do not reset the episode.** One healthy bucket inside a bad run makes that single window evaluate false (the walkthrough's b7: 4 of the last 7 < 5) — but the episode stays live; it clears only on a *sustained* stretch of non-tripping windows.
+          - **So "alarm live through H" = the condition never clears for a sustained stretch across the ~$H/w$ evaluations**, and that continuous survival at the committed budgets (α, F_false, δ) is the significance evidence.
+          </details>
    - **Step 4 — all pass → re-baseline.** Estimate $\hat\lambda_{\text{new}}$ = the mean of the stable confirmation window, **excluding the transition buckets**. Then re-run the module's baseline discipline on the new level, exactly as for the original: same window discipline (enough buckets — ≥ n_required), refit the model (the overdispersion check decides Poisson vs NB), recompute the limits at the same α with **exact ppf** (no normal approximation), and re-commit the (N, M) rule from the same budgets (F_false, δ, T_latency) — nothing left to runtime judgment. **Archive the old baseline**, and log the re-baseline event — old λ̂, new λ̂, timestamp $t_0 + H$, which tests passed — so the decision is reversible and auditable.
    - **Step 5 — any fail → do not re-baseline.** Treat it as an incident: investigate (vendor status page; our-side changes: contract tier, purchased SKUs/endpoints, consumer-side changes), keep the old baseline live so the alarm keeps firing. When the rate reverts, the alarm stops — and nothing was baked into "normal".
    - **Direction asymmetry — drops.** A drop is more often a transient upstream incident (outage, stall, feed break) than a structural change, so the not-to-re-baseline bias is *stronger* for drops: re-baseline a drop only if it survives H *and* has a known structural cause (e.g., a vendor notice — a discontinued product line, a lost licence, a removed endpoint).
-- **Sanity picture — a Poisson vendor feed.**
-   - **Pass — genuine scaling.** $\lambda_{\text{old}} = 1{,}000$/min; every slice rises ~30%. At $t_0 + H$: $\hat\lambda_{\text{cand}} \approx 1{,}300$; (a) all slice growth factors ≈ 1.30 (uniform); (b) D inside the χ² band (still Poisson) and $\hat r_1 \approx 0.02$ (no serial dependence); (c) early vs. late thirds ≈ 1,295 vs 1,303 (flat). → **re-baseline to 1,300**.
-   - **Fail — the same +30% from a replay.** Buckets alternate ≈ 0 and ≈ 4,000: (b) fails hard — $\hat r_1 \approx 0.5 \gg 2/\sqrt{n}$ and D far outside the χ² band. → **investigate (a vendor-side drain/replay), no re-baseline**; when the drain ends the rate reverts and nothing was baked in.
+</details>
+
+- **Different Examples to demonstrate**
+
+   - <details>
+     <summary><strong>Rejected at (a) slice uniformity — growth concentrated in the day slice (mix changed)</strong></summary>
+
+       - **Assumed values** (counts in thousands of events): baseline (old) column $C_{\text{old}} = 1000 + 2000 + 1500 = 4500$; candidate (new) column $C_{\text{new}} = 1050 + 3000 + 1800 = 5850$; grand total $G = 4500 + 5850 = 10{,}350$. Feed is Poisson ⇒ $\rho_s = 1$, so each cell's denominator is $\rho_s E = E$. $\alpha_{\text{slice}} = 0.05$; $S = 3$ slices ⇒ $\mathrm{df} = S - 1 = 2$; threshold $\chi^2_2(0.95) = 5.99$ (given).
+       - **Pooled row totals** $R_s = O_{s,\text{old}} + O_{s,\text{new}}$: night $2050$, day $5000$, evening $3300$ (check $\sum_s R_s = 10{,}350 = G$). Column totals $C_{\text{old}} = 4500$, $C_{\text{new}} = 5850$.
+       - **Expected cells, old** $E_{s,\text{old}} = R_s \times C_{\text{old}} / G$: night $\frac{2050 \times 4500}{10{,}350} \approx 891.3$; day $\frac{5000 \times 4500}{10{,}350} \approx 2173.9$; evening $\frac{3300 \times 4500}{10{,}350} \approx 1434.8$.
+       - **Expected cells, new** $E_{s,\text{new}} = R_s \times C_{\text{new}} / G$: night $\frac{2050 \times 5850}{10{,}350} \approx 1158.7$; day $\frac{5000 \times 5850}{10{,}350} \approx 2826.1$; evening $\frac{3300 \times 5850}{10{,}350} \approx 1865.2$.
+       - **χ²_u terms, old:** $\frac{(1000-891.3)^2}{891.3} = \frac{108.7^2}{891.3} \approx 13.26$; $\frac{(2000-2173.9)^2}{2173.9} \approx 13.91$; $\frac{(1500-1434.8)^2}{1434.8} \approx 2.96$; sum $30.13$.
+       - **χ²_u terms, new:** $\frac{(1050-1158.7)^2}{1158.7} \approx 10.20$; $\frac{(3000-2826.1)^2}{2826.1} \approx 10.70$; $\frac{(1800-1865.2)^2}{1865.2} \approx 2.28$; sum $23.18$.
+       - **Total & comparison:** $\chi^2_u \approx 30.13 + 23.18 \approx 53.3 > 5.99 = \chi^2_2(0.95)$ ⇒ **REJECT** at $\alpha_{\text{slice}} = 0.05$ (the day slice alone contributes $\approx 13.91 + 10.70 \approx 24.6$).
+       - **Verdict:** the rise is concentrated in the day slice, not uniform — the slice mix changed — so the window **fails check (a) and no re-baseline is allowed**; investigate (e.g., a business-hours-only source) before treating the +30% as structural.
+    </details>
+
+   - <details>
+     <summary><strong>Rejected at (b) noise invariance — a replay burst (burstier + autocorrelated)</strong></summary>
+
+      - **Assumed values:** no seasonality; Poisson feed with $\lambda_{\text{old}} = 1{,}000$ events/min; bucket width $w = 1$ min; horizon $H = 1$ day $= 1{,}440$ min ⇒ $n_{\text{cand}} = 1{,}440$; candidate-window estimates from the replay $\hat\lambda_{\text{cand}} = 1{,}300$, $s^2_{\text{cand}} = 1{,}690{,}000$, $\hat r_1 = 0.5$; $\alpha_{\text{disp}} = 0.05$, with the given quantile $\chi^2_{n_{\text{cand}}-1}(0.95) = \chi^2_{1439}(0.95) \approx 1{,}528$; band $2/\sqrt{n_{\text{cand}}} = 2/\sqrt{1{,}440} \approx 0.0527$.
+      - **Dispersion statistic (Poisson branch):** $D_{\text{cand}} = \frac{(n_{\text{cand}}-1)\, s^2_{\text{cand}}}{\hat\lambda_{\text{cand}}} = \frac{(1{,}440-1)\times 1{,}690{,}000}{1{,}300} = \frac{1{,}439 \times 1{,}690{,}000}{1{,}300} = \frac{2{,}431{,}910{,}000}{1{,}300} = 1{,}870{,}700$.
+      - **Dispersion verdict:** need $D_{\text{cand}} \le \chi^2_{1439}(0.95) \approx 1{,}528$; $1{,}870{,}700 > 1{,}528$ ⇒ **fail** — a Poisson feed sits near $D \approx n-1 = 1{,}439$, so the variance-to-mean ratio $s^2_{\text{cand}}/\hat\lambda_{\text{cand}} = 1{,}690{,}000/1{,}300 = 1{,}300$ is ~1,300× the Poisson value 1.
+      - **Serial-independence verdict:** need $|\hat r_1| \le 2/\sqrt{n_{\text{cand}}} \approx 0.0527$; $|0.5| = 0.5 > 0.0527$ ⇒ **fail** — strong positive lag-1 autocorrelation.
+      - **Conclusion:** the arrival process changed shape — burstier **and** autocorrelated — not merely its level ⇒ **no re-baseline**; the alert stays live on the old baseline and reverts once the vendor-side replay/backlog drain ends; investigate the vendor replay before any retest.
+     </details>
+
+   - <details>
+     <summary><strong>Rejected at (c) stationarity — a pulse drifting back to λ_old</strong></summary>
+
+      - **Assumed base:** no seasonality; Poisson feed; $\lambda_{\text{old}} = 1{,}000$ events/min; bucket width $w = 1$ min; horizon $H = 1$ day $= 1{,}440$ min ⇒ $n_{\text{cand}} = 1{,}440$ buckets = three thirds of $480$ each.
+      - **Observed candidate-window third means (given):** early $1{,}290$, middle $1{,}180$, late $1{,}010$ events/min.
+      - **Comparison:** stationarity requires early ≈ late (a flat plateau); early ($1{,}290$) ≠ late ($1{,}010$) ⇒ fail; the sequence $1{,}290 \to 1{,}180 \to 1{,}010$ drifts back toward $\lambda_{\text{old}} = 1{,}000$ — the late third is already near the old level.
+      - **Reading:** a **pulse** — a transient that is ending — not a settled plateau ⇒ **no re-baseline**; wait, and once the rate fully reverts the alert stops by itself.
+      - **The other (c) failure is a ramp:** e.g. $1{,}100 \to 1{,}300 \to 1{,}500$ — still moving through all thirds, never settling ⇒ also no re-baseline.
+     </details>
+
+   - <details>
+     <summary><strong>Rejected at (d) level significance — the alarm never stayed live through H (a short spike)</strong></summary>
+
+      - **Assumptions:** Poisson, no seasonality; $\lambda_{\text{old}} = 1{,}000$ events/min; limits $\mathrm{LCL} = 898$, $\mathrm{UCL} = 1{,}106$ (exact ppf at two-sided α = 0.001, given); run rule $(N,M) = (5,7)$; $w = 1$ min; $H = 1$ day $= 1{,}440$ min.
+      - **The transient:** a bad deploy pushes 6 consecutive buckets to ≈ 5,000 (all ≫ UCL ⇒ 6 crossings), then the feed returns to ≈ 1,000 (in-control, 0 crossings). The burst spans 6 min.
+      - **The rule fires at $t_0$:** any trailing 7-window overlapping the burst holds 5–6 crossings, so once the 5th burst bucket enters the window the rule trips (≈ the 5th burst minute).
+      - **The rule clears within minutes:** after the burst every bucket is ≈ 1,000 ∈ [898, 1,106] (0 crossings); ~7 buckets (~7 min) push all six burst buckets out of the trailing window ⇒ the rule CLEARS at ≈ $t_0 + 7$ min and never re-fires. The live episode spans ≈ 13 min ≈ 0.9% of H.
+      - **Gate (d) fails ⇒ no re-baseline:** the battery runs only if the alarm stayed live through the entire $H = 1{,}440$ min; it cleared at ≈ $t_0 + 7 \ll H$ ⇒ (d)'s level-difference certificate is absent ⇒ **no re-baseline**; keep $\lambda_{\text{old}} = 1{,}000$; log as an incident (deployment artifact), route to on-call.
+     </details>
+
+   - <details>
+     <summary><strong>Eligible — passes all four checks: genuine +30% growth → re-baseline to λ_new = 1,300</strong></summary>
+
+      - **Assumed values.** No seasonality; Poisson feed; $\lambda_{\text{old}} = 1{,}000$ events/min; old limits $\mathrm{LCL} = 898$ / $\mathrm{UCL} = 1{,}106$ (exact ppf at α = 0.001, given). Run rule $(N, M) = (5, 7)$; $F_{\text{false}} = 1$/day; δ = 0.05; $w = 1$ min; $H = 1$ day $= 1{,}440$ min ⇒ $n_{\text{cand}} = 1{,}440$; three slices, each old share 1/3. Candidate observations (given): $\hat\lambda_{\text{cand}} = 1{,}300$; $s^2_{\text{cand}} = 1{,}300$; $\hat r_1 = 0.02$; thirds $1{,}295/1{,}301/1{,}303$; every slice ×1.30 ⇒ $\hat\lambda_{\text{cand}}/\lambda_{\text{old}} = 1{,}300/1{,}000 = 1.30$ (+30%, uniform).
+      - **(a) Slice uniformity:** each slice grows ×1.30 ⇒ every share stays 1/3 ⇒ $O = E$ in every cell ⇒ $\chi^2_u = 0 < 5.99$ ⇒ pass.
+      - **(b) Noise invariance:** $D_{\text{cand}} = (1{,}440-1) \times 1{,}300 / 1{,}300 = 1{,}439 < 1{,}528$ ⇒ pass; $|0.02| < 0.0527$ ⇒ pass.
+      - **(c) Stationarity:** early $1{,}295 \approx$ late $1{,}303$ (≈ 0.6% apart, middle $1{,}301$) — flat plateau ⇒ pass.
+      - **(d) Level significance:** the shift is genuine and persistent — the alarm stayed live through H (the (5,7) rule kept firing at 1,300, above old UCL 1,106) ⇒ pass. All four pass ⇒ eligible to re-baseline.
+      - **Re-baseline calculation:** $\hat\lambda_{\text{new}} = 1{,}300$. Dispersion check $s^2/\hat\lambda = 1{,}300/1{,}300 = 1$ ⇒ stay Poisson. New limits (given): $\mathrm{LCL}_{\text{new}} = poisson.ppf(0.0005,\, 1{,}300) = 1{,}183$; $\mathrm{UCL}_{\text{new}} = poisson.ppf(0.9995,\, 1{,}300) = 1{,}420$. Re-commit $(N, M) = (5, 7)$ with the same budgets $F_{\text{false}} = 1$/day, δ = 0.05; archive the old baseline ($\lambda_{\text{old}} = 1{,}000$; limits 898/1,106) and log the event.
+      - **Result:** live baseline now $\lambda_{\text{new}} = 1{,}300$ with limits $[1{,}183,\, 1{,}420]$ — +30% above the archived one, correctly centered on the true rate.
+     </details>
 
 ### Per-column statistics
 
