@@ -444,90 +444,11 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 
 #### Hyperparameter dependency graph
 
-```mermaid
-flowchart TB
-    subgraph FACTS["Facts — measured / given"]
-        E["E: total events in period"]
-        T["T: baseline period duration"]
-        BUF["buffer K, retrain window, replay horizon"]
-    end
+<details>
+<summary><strong>Dependency graph with the code</strong> — every edge's weight: the shortest Python that computes each sink from its sources; the code segment (dotted border) sits between the sources and the sink</summary>
 
-    subgraph REQ["Step 1 — requirements you choose"]
-        D["Δ: smallest shift to catch"]
-        QS["q*: target per-bucket power"]
-        A["α: per-bucket false-alert rate"]
-        R["ρ*: overdispersion to catch"]
-        B["β: dispersion-test miss rate"]
-    end
-
-    subgraph S1["Step 1 — derived (Stages A & B)"]
-        LF["λ_floor"]
-        NR["n_required"]
-        W["w: bucket width"]
-    end
-
-    subgraph S234["Steps 2–4 — baseline → model → limits"]
-        NB["n = T/w baseline buckets"]
-        MODEL["fitted model: Poisson or NB (λ̂, φ̂, σ)"]
-        LIM["UCL / LCL — exact ppf quantiles"]
-    end
-
-    subgraph S6["Step 6 — trigger rule"]
-        TMN["T_min = w_min = λ_floor/r"]
-        TMX["T_max"]
-        TL["T_latency"]
-        MM["M"]
-        QQ["q: per-bucket power at Δ"]
-        FB["F_false , δ"]
-        NN["N"]
-        RULE["rule: ≥ N of last M cross the limit"]
-    end
-
-    RATE["r = E/T"]
-
-    E --> RATE
-    T --> RATE
-    D --> LF
-    QS --> LF
-    A --> LF
-    R --> NR
-    B --> NR
-    LF --> W
-    RATE --> W
-    NR --> W
-    T --> W
-    W --> NB
-    NR --> NB
-    NB --> MODEL
-    MODEL --> LIM
-    A --> LIM
-    LF --> TMN
-    RATE --> TMN
-    BUF --> TMX
-    TMN --> TL
-    TMX --> TL
-    TL --> MM
-    W --> MM
-    D --> QQ
-    MODEL --> QQ
-    MM --> NN
-    A --> NN
-    QQ --> NN
-    FB --> NN
-    MM --> RULE
-    NN --> RULE
-    LIM --> RULE
-    RULE --> ALERT["alert fires"]
-```
-
-Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so one model serves every bucket.
-
----
-
-#### The same graph, with the code that computes each sink (edge weights)
-
-- **What an edge's weight is.** The dependency graph above shows *which* node feeds *which*. Each arrow also hides a derivation: the sink's value is *computed* from its source(s), and the shortest Python that does that computation is the edge's **weight**.
-- **Why the weight becomes a node, not a label.** A sink with a single source (T_max ← buffer facts) could carry its code on that one edge. A sink with several sources cannot: its code must jointly consume *all* incoming edges, so the code sits as an **intermediate segment node** — it acts as the sink of the incoming edges — and one edge then runs from the segment to the real sink node. The companion diagram below draws exactly that: source → code segment → sink.
+- **What an edge's weight is.** The dependency graph shows *which* node feeds *which*. Each arrow also hides a derivation: the sink's value is *computed* from its source(s), and the shortest Python that does that computation is the edge's **weight**.
+- **Why the weight becomes a node, not a label.** A sink with a single source (T_max ← buffer facts) could carry its code on that one edge. A sink with several sources cannot: its code must jointly consume *all* incoming edges, so the code sits as an **intermediate segment node** — it acts as the sink of the incoming edges — and one edge then runs from the segment to the real sink node. The diagram below draws exactly that: source → code segment → sink.
 - **Notation.** The code uses ASCII names (`lam_floor`, `alpha`, `delta` = the Δ shift, `qstar`, `rho_star`, `beta`, `n_req`, `lam_hat`, `phi`, `F_false`) — Greek letters and hats are not dependable identifiers — mapping one-to-one onto the graph's symbols. Prelude, counted once: `from itertools import count`; `from scipy.stats import poisson, nbinom, chi2, binom`; fixed constant **α_disp = 0.05**. Every limit/power snippet is the exact ppf/CDF machinery from steps 1–4 — no normal approximation anywhere.
 - **Closed forms — one line each:**
    - **r ← E, T** — `r = E / T` (mean rate).
@@ -537,7 +458,7 @@ Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so 
    - **T_min ← λ_floor, r** — `T_min = lam_floor / r`.
    - **T_max ← buffer facts (K, retrain window, replay horizon)** — `T_max = min(K / r, retrain_window, replay_horizon)`.
    - **limits ← model, α** — `LCL, UCL = poisson.ppf((alpha/2, 1 - alpha/2), lam_hat)`; NB: `LCL, UCL = nbinom.ppf((alpha/2, 1 - alpha/2), phi, phi/(phi + lam_hat))`.
-   - **q ← model, Δ** — spike: `q = 1 - poisson.cdf(UCL, lam_hat*(1 + delta))`; drop: `q = poisson.cdf(LCL - 1, lam_hat*(1 - delta))`; NB uses the same calls on `nbinom` with p = φ/(φ + shifted mean). *q needs UCL, so α rides into this code implicitly* — the companion diagram adds the edge A → q-segment that the dependency graph left implicit.
+   - **q ← model, Δ** — spike: `q = 1 - poisson.cdf(UCL, lam_hat*(1 + delta))`; drop: `q = poisson.cdf(LCL - 1, lam_hat*(1 - delta))`; NB uses the same calls on `nbinom` with p = φ/(φ + shifted mean). *q needs UCL, so α rides into this code implicitly* — the diagram adds the edge A → q-segment that the plain graph left implicit.
 - **Model fit ← baseline buckets** — the overdispersion decision in two lines:
    ```
    s2 = var(bucket_counts); lam_hat = mean(bucket_counts)
@@ -550,7 +471,7 @@ Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so 
    drop  = sum(x < LCL for x in last_M) >= N
    alert = spike or drop
    ```
-   (alert ← rule is the identity `if alert: fire()`, so the companion diagram keeps that last edge plain.)
+   (alert ← rule is the identity `if alert: fire()`, so the diagram keeps that last edge plain.)
 - **The picks — code is a constraint, not a closed form** (these sinks are *chosen* inside a computed corridor):
    - **w ← λ_floor, r, n_required, T** — `w_lo, w_hi = lam_floor / r, T / n_req`, then choose `w = T / n` for an integer n in `[n_req, int(r*T/lam_floor)]`.
    - **T_latency ← T_min, T_max** — `assert T_min <= T_latency <= T_max`, then pick inside the corridor (Example A: 10 min).
@@ -562,8 +483,8 @@ Step 5 (seasonality) is omitted above: this feed has no time-of-day pattern, so 
                if binom.sf(k - 1, M, alpha) <= F_false / bpd)
       assert binom.sf(N - 1, M, q) >= 1 - delta and M * w <= T_latency   # Side 2
       ```
-      Side 2's buckets-per-day needs w — another implicit dependency the companion diagram draws (W → N-segment). The worked example's N = 5 sits *above* N_lo = 2 (Side 1 already clears at N ≥ 2): a margin choice, exactly as step 6 states.
-- **Companion diagram** — the same graph with a code segment inserted on every arrow path; the segment's label *is* the shortest snippet above (≤ and ≥ stand in for < and > so the labels parse cleanly):
+      Side 2's buckets-per-day needs w — another implicit dependency the diagram draws (W → N-segment). The worked example's N = 5 sits *above* N_lo = 2 (Side 1 already clears at N ≥ 2): a margin choice, exactly as step 6 states.
+- **The diagram** — a code segment inserted on every arrow path; the segment's label *is* the shortest snippet above (≤ and ≥ stand in for < and > so the labels parse cleanly):
 
 ```mermaid
 flowchart TB
@@ -672,6 +593,10 @@ flowchart TB
     classDef codeSeg stroke-dasharray: 2 4,stroke-width:1.5px;
     class CR,CLF,CNR,CW,CNB,CMODEL,CLIM,CTMN,CTMX,CTL,CMM,CQQ,CNN,CRULE codeSeg;
 ```
+
+   - **Step 5 (seasonality) is omitted from this graph:** the feed has no time-of-day pattern, so one model and one set of limits serve every bucket.
+
+</details>
 
 ---
 
