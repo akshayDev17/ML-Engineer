@@ -447,45 +447,6 @@ The cheap early-warning tool is **distributional monitoring on raw inputs**, in 
 <details>
 <summary><strong>Dependency graph with the code</strong> — every edge's weight: the shortest Python that computes each sink from its sources; the code segment (dotted border) sits between the sources and the sink</summary>
 
-- **What an edge's weight is.** The dependency graph shows *which* node feeds *which*. Each arrow also hides a derivation: the sink's value is *computed* from its source(s), and the shortest Python that does that computation is the edge's **weight**.
-- **Why the weight becomes a node, not a label.** A sink with a single source (T_max ← buffer facts) could carry its code on that one edge. A sink with several sources cannot: its code must jointly consume *all* incoming edges, so the code sits as an **intermediate segment node** — it acts as the sink of the incoming edges — and one edge then runs from the segment to the real sink node. The diagram below draws exactly that: source → code segment → sink.
-- **Notation.** The code uses ASCII names (`lam_floor`, `alpha`, `delta` = the Δ shift, `qstar`, `rho_star`, `beta`, `n_req`, `lam_hat`, `phi`, `F_false`) — Greek letters and hats are not dependable identifiers — mapping one-to-one onto the graph's symbols. Prelude, counted once: `from itertools import count`; `from scipy.stats import poisson, nbinom, chi2, binom`; fixed constant **α_disp = 0.05**. Every limit/power snippet is the exact ppf/CDF machinery from steps 1–4 — no normal approximation anywhere.
-- **Closed forms — one line each:**
-   - **r ← E, T** — `r = E / T` (mean rate).
-   - **λ_floor ← Δ, q*, α** — `lam_floor = next(lam for lam in count(1) if 1 - poisson.cdf(poisson.ppf(1 - alpha/2, lam), lam*(1 + delta)) >= qstar)` — the exact-power scan behind the table: q(Δ; λ) = 1 − F_{λ(1+Δ)}(UCL), the first λ reaching q*; same recipe on `nbinom` for the NB case.
-   - **n_required ← ρ*, β** — `n_req = next(n for n in count(2) if chi2.ppf(1 - alpha_disp, n - 1) / chi2.ppf(beta, n - 1) <= rho_star)` — the χ² power scan (df = n−1, so the scan starts at n = 2).
-   - **n ← T, w** — `n = T // w` — the "≥ n_required" guarantee needs no code: step 1's bracket (w ≤ T/n_required) built it in.
-   - **T_min ← λ_floor, r** — `T_min = lam_floor / r`.
-   - **T_max ← buffer facts (K, retrain window, replay horizon)** — `T_max = min(K / r, retrain_window, replay_horizon)`.
-   - **limits ← model, α** — `LCL, UCL = poisson.ppf((alpha/2, 1 - alpha/2), lam_hat)`; NB: `LCL, UCL = nbinom.ppf((alpha/2, 1 - alpha/2), phi, phi/(phi + lam_hat))`.
-   - **q ← model, Δ** — spike: `q = 1 - poisson.cdf(UCL, lam_hat*(1 + delta))`; drop: `q = poisson.cdf(LCL - 1, lam_hat*(1 - delta))`; NB uses the same calls on `nbinom` with p = φ/(φ + shifted mean). *q needs UCL, so α rides into this code implicitly* — the diagram adds the edge A → q-segment that the plain graph left implicit.
-- **Model fit ← baseline buckets** — the overdispersion decision in two lines:
-   ```
-   s2 = var(bucket_counts); lam_hat = mean(bucket_counts)
-   fit = NB(phi=lam_hat**2/(s2 - lam_hat)) \
-         if (n-1)*s2/lam_hat > chi2.ppf(1 - alpha_disp, n - 1) else Poisson(lam_hat)
-   ```
-- **Rule ← M, N, limits** — one counter per direction, never merged:
-   ```
-   spike = sum(x > UCL for x in last_M) >= N
-   drop  = sum(x < LCL for x in last_M) >= N
-   alert = spike or drop
-   ```
-   (alert ← rule is the identity `if alert: fire()`, so the diagram keeps that last edge plain.)
-- **The picks — code is a constraint, not a closed form** (these sinks are *chosen* inside a computed corridor):
-   - **w ← λ_floor, r, n_required, T** — `w_lo, w_hi = lam_floor / r, T / n_req`, then choose `w = T / n` for an integer n in `[n_req, int(r*T/lam_floor)]`.
-   - **T_latency ← T_min, T_max** — `assert T_min <= T_latency <= T_max`, then pick inside the corridor (Example A: 10 min).
-   - **M ← T_latency, w** — pick an integer ≤ `int(T_latency // w)`.
-   - **N ← M, α, q, F_false, δ** — Side 1 fixes the floor, Side 2 the ceiling:
-      ```
-      bpd = (24*60) // w                          # buckets per day, w in minutes
-      N = next(k for k in range(1, M + 1)         # Side 1 → N_lo
-               if binom.sf(k - 1, M, alpha) <= F_false / bpd)
-      assert binom.sf(N - 1, M, q) >= 1 - delta and M * w <= T_latency   # Side 2
-      ```
-      Side 2's buckets-per-day needs w — another implicit dependency the diagram draws (W → N-segment). The worked example's N = 5 sits *above* N_lo = 2 (Side 1 already clears at N ≥ 2): a margin choice, exactly as step 6 states.
-- **The diagram** — a code segment inserted on every arrow path; the segment's label *is* the shortest snippet above (≤ and ≥ stand in for < and > so the labels parse cleanly):
-
 ```mermaid
 flowchart TB
     subgraph FACTS["Facts — measured / given"]
@@ -593,9 +554,6 @@ flowchart TB
     classDef codeSeg stroke-dasharray: 2 4,stroke-width:1.5px;
     class CR,CLF,CNR,CW,CNB,CMODEL,CLIM,CTMN,CTMX,CTL,CMM,CQQ,CNN,CRULE codeSeg;
 ```
-
-   - **Step 5 (seasonality) is omitted from this graph:** the feed has no time-of-day pattern, so one model and one set of limits serve every bucket.
-
 </details>
 
 ---
@@ -612,20 +570,28 @@ flowchart TB
 - The core principle: **never re-baseline on volume alone** — a genuine level shift and a disguised raid (bot raid causing higher-than-usual event-volume) look identical on the volume meter (both are "sustained high"). 
 - The discriminator is a *second signal*: genuine growth preserves *composition*; a raid distorts it.
 
-- **Detect — growth vs. disguised raid.** 
-    - Genuine growth means *more* people doing the same things: volume scales up **and unique identities scale up proportionally**, and the *mix* (IPs, geos, devices, user-agents) keeps the same proportions. 
-    - A raid on the otherhand means the *same* few actors doing more: volume up, unique identities flat, one IP/user-agent dominating. 
-    - The numeric discriminator is the **volume-to-breadth ratio** $\lambda / u$, where $u$ is the distinct-identity count (e.g., distinct IPs per minute):
+- **Detect — growth vs. disguised raid.**
+   - **The table — the object O and E live in.** Columns = **periods P**: **old** (the baseline period λ_old was measured on) and **new** (the sustained post-shift window, transition excluded). Rows = **time slices s**: the same (day-of-week × hour) slices step 5 uses. Every event lands in exactly one cell (s, P) — its slice comes from its timestamp's day-of-week × hour, its period from which window contains that timestamp. The example below uses three coarse slices (night / day / evening) so the arithmetic stays readable; the full (day × hour) version has 168 rows and identical arithmetic. Counts below are in thousands of events.
 
-  | | old normal | genuine growth | bot raid |
-  |---|---|---|---|
-  | λ (events/min) | 1,000 | 10,000 | 10,000 |
-  | u (distinct IPs/min) | 800 | ~8,000 | ~800 |
-  | λ / u | 1.25 | **1.25 (stable)** | **12.5 (blew up)** |
-  | composition PSI | — | 0.08 (< 0.25) | 0.6 (> 0.25) |
+     | slice s | old | new | row total $R_s$ |
+     |---|---|---|---|
+     | night (00–08) | 1,000 | 1,050 | 2,050 |
+     | day (08–16) | 2,000 | 3,000 | 5,000 |
+     | evening (16–24) | 1,500 | 1,800 | 3,300 |
+     | column total $C_P$ | 4,500 | 5,850 | $G$ = 10,350 |
 
-  Decision rule: run the volume check **and** the per-column check together — if volume moved but breadth scaled proportionally *and* composition PSI stayed below 0.25, it's a genuine shift; otherwise it's a raid. Business corroboration (registrations / revenue / launches) is the tiebreaker.
-
+   - **O — observed (measured, never derived).** $O_{s,P}$ = the events actually counted in cell (s, P). To compute it: (1) pick one cell (one slice s, one period P); (2) take every bucket whose timestamp lies in period P and keep those whose timestamp also lies in slice s; (3) sum the kept buckets' counts — $O_{s,P} = \sum_{j \in (s,P)} x_j$. Nothing else is involved: O is read off the data, never computed from other cells.
+      - **Worked — (s = night, P = old):** the old period's night buckets sum to **O = 1,000** (e.g., three buckets 320 + 340 + 340).
+      - **Worked — (s = day, P = new):** the new period's day buckets sum to **O = 3,000**.
+   - **E — expected (derived, never measured).** $E_{s,P}$ = the count slice s *would* contribute to period P **if the slice mix were identical in both periods** — the periods would then differ only in total size (new = old scaled uniformly). E is not data; it is computed from the table's own totals, in four steps:
+      - **Step 1 — row total $R_s = O_{s,\text{old}} + O_{s,\text{new}}$** — the slice's pooled evidence: under "same mix" the two periods are one population, so both testify about s's share. $R_{\text{night}} = 1{,}000 + 1{,}050 = 2{,}050$; $R_{\text{day}} = 2{,}000 + 3{,}000 = 5{,}000$; $R_{\text{evening}} = 1{,}500 + 1{,}800 = 3{,}300$.
+      - **Step 2 — column total $C_P = \sum_s O_{s,P}$** — each period's total size. $C_{\text{old}} = 1{,}000 + 2{,}000 + 1{,}500 = 4{,}500$; $C_{\text{new}} = 1{,}050 + 3{,}000 + 1{,}800 = 5{,}850$.
+      - **Step 3 — grand total $G$.** $G = C_{\text{old}} + C_{\text{new}} = 4{,}500 + 5{,}850 = 10{,}350$, which must equal $\sum_s R_s = 2{,}050 + 5{,}000 + 3{,}300 = 10{,}350$ — the same number by two routes, a built-in check.
+      - **Step 4 — the expected cell:** $E_{s,P} = \frac{R_s \cdot C_P}{G}$ — the slice's pooled share ($R_s / G$) of the period's size ($C_P$).
+   - **E — worked examples (the same four steps, applied to specific cells):**
+      - **Example A — (s = night, P = old):** $E_{\text{night,old}} = \frac{R_{\text{night}} \cdot C_{\text{old}}}{G} = \frac{2{,}050 \times 4{,}500}{10{,}350} = \frac{9{,}225{,}000}{10{,}350} \approx 891.3$. Night "should" contribute ≈ 891 (thousand events) to old; it actually contributes **O = 1,000**.
+      - **Example B — (s = day, P = new):** $E_{\text{day,new}} = \frac{R_{\text{day}} \cdot C_{\text{new}}}{G} = \frac{5{,}000 \times 5{,}850}{10{,}350} = \frac{29{,}250{,}000}{10{,}350} \approx 2{,}826.1$. Day "should" contribute ≈ 2,826 to new; it actually contributes **O = 3,000**.
+      - **Arithmetic self-check:** within each column the E's sum back to that column's total: $E_{\text{night,old}} + E_{\text{day,old}} + E_{\text{evening,old}} = 891.3 + 2{,}173.9 + 1{,}434.8 = 4{,}500 = C_{\text{old}}$ (rounding aside). E never creates or destroys events — it only redistributes each column total according to the pooled shares.
 - **Enact — CUSUM, then a stable window.** Confirm the shift is *legitimate and sustained* (not a spike) with **CUSUM** (cumulative sum), the classic change detector for a level shift:
 
   $$S_i = \max\!\big(0,\; S_{i-1} + x_i - (\lambda_{\text{old}} + k)\big), \qquad \text{alert when } S_i > h,$$
