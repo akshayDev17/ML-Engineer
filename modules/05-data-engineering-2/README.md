@@ -668,6 +668,9 @@ flowchart TB
     LIM --> CRULE
     CRULE --> RULE
     RULE --> ALERT["alert fires"]
+
+    classDef codeSeg stroke-dasharray: 2 4,stroke-width:1.5px;
+    class CR,CLF,CNR,CW,CNB,CMODEL,CLIM,CTMN,CTMX,CTL,CMM,CQQ,CNN,CRULE codeSeg;
 ```
 
 ---
