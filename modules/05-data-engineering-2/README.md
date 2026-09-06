@@ -747,6 +747,11 @@ flowchart TB
    - numeric → mean, median, standard deviation, p5/p50/p95, missingness rate
    - categorical → cardinality, top-k frequencies, missingness rate (no. of missing rows for this column to total no. of rows in this window)
 2. Collect the baseline: compute the statistic per window over the known-good period — you get a *distribution of the statistic* (e.g., 60 daily means of `amount`).
+   - **The common algorithm behind every per-window statistic — four steps (the chain of thought; per-stat answers follow below).** Every statistic's window-size logic ($K$) is the same four-step sequence:
+      - **Step 1 — choose the empirical estimator.** Pick the window statistic: the empirical quantity computed from the window's $K$ rows that estimates the statistic's own *population-level value*.
+      - **Step 2 — derive its sampling noise.** Compute the standard error (SE) of that estimator as a function of $K$. The estimator is an average-like empirical functional of the $K$ rows, so its noise always decays like $1/\sqrt{K}$ — it takes the shape "a population-level noise parameter divided by $\sqrt{K}$".
+      - **Step 3 — divide the sampling noise of the estimator by the population-level value of the same statistic.** This division removes the units and turns the error into a dimensionless, relative measure: it answers "the window estimate is off by what fraction of the very thing it is estimating?"
+      - **Step 4 — set the relative error to a pre-committed tolerance $\delta$ and find $K$'s valid value or range.** Impose relative noise $\le \delta$ and invert the $K$-dependence from Step 2 - each statistic then yields its own explicit formula for $K$ (a dimensionless shape coefficient over $\delta$, squared), which is what the per-statistic bullets below derive.
    - **mean statistic for Numeric column**
      <details>
      <summary><strong>The full derivation, folded — why the window mean's SE = σ/√K and K_needed = (CV/δ_w)², step by step</strong></summary>
@@ -888,7 +893,11 @@ flowchart TB
            - Result: the baseline array $\{\hat p_1, \ldots, \hat p_{n_{\mathrm{win}}}\}$ — the same "distribution of the statistic" template as the mean.
         - **Step 2 — choose the window width against the baseline rate (the sizing story).**
            - Count noise is $\sqrt{\text{count}}$, so the relative noise of $\hat p$ is $\approx 1/\sqrt{Kp}$.
-              - **Setup (all assumptions stated, nothing hidden):** $X$ = number of missing rows = $\sum_{i=1}^{K} Z_i$, where $Z_i = \mathbf 1\{\text{row } i \text{ is missing}\}$. Assumptions: (i) each row is missing independently of the others, with the *same* probability $p$ (i.i.d. Bernoulli rows); (ii) $K$ is fixed (the window's row count); (iii) $p \in (0,1]$ (positive, so the division by $p$ in Step D is legitimate) and is constant within the window.
+              - **Setup (all assumptions stated, nothing hidden):** $X$ = number of missing rows = $\sum_{i=1}^{K} Z_i$, where $Z_i = \mathbf 1\{\text{row } i \text{ is missing}\}$. \
+              Assumptions: 
+                1. each row is missing independently of the others, with the *same* probability $p$ (i.i.d. Bernoulli rows); 
+                2. $K$ is fixed (the window's row count); 
+                3. $p \in (0,1]$ (positive, so the division by $p$ in Step D is legitimate) and is constant within the window.
               - **Step A — variance of one Bernoulli (no independence needed here):** $Z_i \in \{0,1\} \Rightarrow Z_i^2 = Z_i$, so $E[Z_i] = p$ and $E[Z_i^2] = p$; hence $\mathrm{Var}(Z_i) = E[Z_i^2] - E[Z_i]^2 = p - p^2 = p(1-p)$.
               - **Step B — variance of the count (independence enters here):** expand the variance of the sum, $\mathrm{Var}(X) = \sum_i \mathrm{Var}(Z_i) + 2\sum_{i<j}\mathrm{Cov}(Z_i, Z_j)$; independence (assumption i) zeroes every covariance, so $\mathrm{Var}(X) = K\,p(1-p)$, and the count noise is $\mathrm{SD}(X) = \sqrt{K\,p(1-p)}$ — "noise $\approx \sqrt{\text{expected count}}$" once $p$ is small (Step E).
               - **Step C — noise of the rate $\hat p$:** $\hat p = X/K$ with $K$ fixed (assumption ii), and scaling by a constant divides the sd by that constant: $\mathrm{SE}(\hat p) = \mathrm{SD}(X)/K = \sqrt{K p(1-p)}/K = \sqrt{\frac{p(1-p)}{K}}$.
