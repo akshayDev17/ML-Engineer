@@ -570,22 +570,6 @@ flowchart TB
 - The core principle: **never re-baseline on volume alone** — a genuine level shift and a disguised raid (bot raid causing higher-than-usual event-volume) look identical on the volume meter (both are "sustained high"). 
 - The discriminator is a *second signal*: genuine growth preserves *composition*; a raid distorts it.
 
-- **Enact — CUSUM, then a stable window.** Confirm the shift is *legitimate and sustained* (not a spike) with **CUSUM** (cumulative sum), the classic change detector for a level shift:
-
-  $$S_i = \max\!\big(0,\; S_{i-1} + x_i - (\lambda_{\text{old}} + k)\big), \qquad \text{alert when } S_i > h,$$
-
-  with $S_0 = 0$, allowance $k = 0.5\sigma$, threshold $h = 5\sigma$, and $\sigma = \sqrt{\lambda_{\text{old}}}$ (Poisson). Noise keeps $S_i$ near 0; a real shift makes it march past $h$. Then, from the stable window alone (excluding the transition):
-
-  $$\lambda_{\text{new}} = \frac{1}{n}\sum_{j=1}^{n} x_j, \qquad \sigma_{\text{new}} = \sqrt{\lambda_{\text{new}}},$$
-
-  and recompute the limits: $\mathrm{UCL} = \lambda_{\text{new}} + k\sqrt{\lambda_{\text{new}}}$, $\mathrm{LCL} = \lambda_{\text{new}} - k\sqrt{\lambda_{\text{new}}}$.
-
-- **Numeric — growth.** $\lambda_{\text{old}} = 1000$, $\sigma = \sqrt{1000} \approx 31.6$, $k \approx 16$, $h \approx 158$. CUSUM detects the shift within a few buckets (a single $x_i = 10{,}000$ gives $S_i = 10000 - 1000 - 16 = 8984 \gg h$). The stable window gives $\lambda_{\text{new}} = 10{,}000$, $\sigma_{\text{new}} = 100$. New limits: $\mathrm{UCL} = 10{,}300$, $\mathrm{LCL} = 9{,}700$.
-
-- **Numeric — shrink.** The direction flips, the machinery doesn't. $\lambda_{\text{old}} = 10{,}000$, $\mathrm{LCL} = 9{,}700$. Volume settles at $\lambda_{\text{new}} = 2{,}000$, $\sigma_{\text{new}} = \sqrt{2000} \approx 44.7$. New limits: $\mathrm{LCL} = 2000 - 3 \cdot 44.7 \approx 1{,}866$, $\mathrm{UCL} \approx 2{,}134$. Detection is identical: CUSUM downward + breadth shrank proportionally + composition PSI stable + business corroboration.
-
-- **The one-line rule.** Re-baseline only when (a) CUSUM confirms a sustained shift, (b) the volume-to-breadth ratio is stable, (c) composition PSI < 0.25, and (d) business signals corroborate — and estimate $\lambda_{\text{new}}$ from a stable confirmation window, never from the transition itself.
-
 <details>
 <summary><strong>User identity-blind upstream (a proprietary feed we are a customer of): structural confirmation</strong></summary>
 
@@ -752,13 +736,176 @@ flowchart TB
       - **Result:** live baseline now $\lambda_{\text{new}} = 1{,}300$ with limits $[1{,}183,\, 1{,}420]$ — +30% above the archived one, correctly centered on the true rate.
      </details>
 
+***
+
 ### Per-column statistics
 
 **What it detects.** A single column's *distribution* has moved — its average/median/percentiles, its number of distinct values (cardinality), or its missingness — while the schema still "looks right."
 
-**Deriving the baseline and thresholds.**
-1. Choose the statistic per column, by type (numeric → mean, median, standard deviation, p5/p50/p95, missingness; categorical → cardinality, top-k frequencies, missingness). Document this once.
+#### Deriving the baseline and thresholds.
+1. Choose the statistic per column, by type. Document this once.
+   - numeric → mean, median, standard deviation, p5/p50/p95, missingness rate
+   - categorical → cardinality, top-k frequencies, missingness rate (no. of missing rows for this column to total no. of rows in this window)
 2. Collect the baseline: compute the statistic per window over the known-good period — you get a *distribution of the statistic* (e.g., 60 daily means of `amount`).
+   - **mean statistic for Numeric column**
+     <details>
+     <summary><strong>The full derivation, folded — why the window mean's SE = σ/√K and K_needed = (CV/δ_w)², step by step</strong></summary>
+
+     <details>
+     <summary><strong>Step 1 — what a window mean is</strong></summary>
+
+        - Window $j$ holds $K$ rows: $X_1, \ldots, X_K$, i.i.d. draws from the column's value distribution, with population mean $\mu$ (the level being estimated) and population sd $\sigma_{\text{col}}$ — the spread of a *single* value around $\mu$.
+        - The statistic: $\bar X = \frac{1}{K}\sum_{i=1}^{K} X_i$ — one estimate of $\mu$ per window.
+     </details>
+
+     <details>
+     <summary><strong>Step 2 — why Var(X̄) = σ²/K, hence SE = σ/√K</strong></summary>
+
+        - **Unbiasedness (linearity only — independence not needed):** $E[\bar X] = \frac{1}{K}\sum_i E[X_i] = \frac{1}{K}(K\mu) = \mu$.
+        - **Variance (independence enters here):** two identities — $\mathrm{Var}(cY) = c^2\,\mathrm{Var}(Y)$, and independent terms give $\mathrm{Var}(\sum_i Y_i) = \sum_i \mathrm{Var}(Y_i)$. With $c = 1/K$: $\mathrm{Var}(\bar X) = \frac{1}{K^2}\cdot K\sigma^2 = \frac{\sigma^2}{K}$.
+        - **Standard error = the sd of the estimator:** $\mathrm{SE}(\bar X) = \sqrt{\sigma^2/K} = \sigma/\sqrt K$.
+        - **Why the shape matters:** error shrinks like $1/\sqrt K$ — halving the noise needs 4× the rows, and this $\sqrt K$ is why every window-sizing formula below is quadratic in $K$.
+     </details>
+
+     <details>
+     <summary><strong>Step 3 — why go to relative error</strong></summary>
+
+        - $\mathrm{SE} = \sigma/\sqrt K$ is in the column's raw units (dollars, milliseconds). "±0.45" is meaningless without the scale: it is 1% of $\mu = 45.2$ but 0.001% of $\mu = 45{,}200$.
+        - The monitor's question is fractional ("is today's window within ~1% of the baseline level?"), so express the budget as a fraction of $\mu$: $\delta_{\text{rel}} = \mathrm{SE}/\mu$.
+        - If $\mu \approx 0$ or the column has no natural zero, the fraction is meaningless → use the absolute form $K = (\sigma/\delta_{\text{abs}})^2$ instead.
+     </details>
+
+     <details>
+     <summary><strong>Step 4 — why CV is forced to appear</strong></summary>
+
+        - Divide the SE by $\mu$ and watch: $\delta_{\text{rel}} = \frac{\mathrm{SE}}{\mu} = \frac{\sigma/\sqrt K}{\mu} = \frac{\sigma}{\mu}\cdot\frac{1}{\sqrt K} = \frac{\mathrm{CV}}{\sqrt K}$.
+        - CV is not something we chose to bring in — dividing the noise $\sigma$ by the level $\mu$ *is* the definition of the coefficient of variation, and the algebra has nowhere else to put it.
+        - The payoff: the relative accuracy of a window mean depends on the parent distribution through exactly one number, CV. Values tight around $\mu$ (small CV) → few rows; spread comparable to the level (large CV) → many rows.
+     </details>
+
+     <details>
+     <summary><strong>Step 5 — why K_needed = (CV/δ_w)²</strong></summary>
+
+        - Budget: the window mean's standard error must be at most $\delta_w$ of the level ($\delta_w = 0.01$ for 1%): $\frac{\mathrm{CV}}{\sqrt K} \le \delta_w \Rightarrow K \ge \left(\frac{\mathrm{CV}}{\delta_w}\right)^2 \Rightarrow K_{\text{needed}} = \lceil(\mathrm{CV}/\delta_w)^2\rceil$.
+        - Worked: `amount` $\mu = 45.2$, $\sigma = 2.1$ ⇒ $\mathrm{CV} \approx 0.0465$; $\delta_w = 1\%$ ⇒ $K = (4.65)^2 \approx 22$ rows per window. High-CV column ($\mathrm{CV} = 3$) at $\delta_w = 5\%$ ⇒ $K = 3{,}600$ — the moment to ask whether the *mean* is even the right statistic.
+        - In practice plug in $\widehat{\mathrm{CV}} = s_{\text{col}}/\bar x_{\text{col}}$ from the baseline; $\delta_w$ as written is a 1-SE budget (≈68% of healthy windows land inside) — for 95% probability multiply by $z^2 \approx 3.84$.
+     </details>
+
+     <details>
+     <summary><strong>Step 6 — when this chain breaks</strong></summary>
+
+        - $\mu \approx 0$ → CV explodes to nonsense → use the absolute form $K = (\sigma/\delta_{\text{abs}})^2$.
+        - Heavy tails (infinite variance, e.g. α ≤ 2 Pareto) → no σ exists, no CLT → drop the mean for the median.
+        - Autocorrelated rows → the $K$ "independent" terms are really $K/\tau$ → size off the effective sample $n_{\text{eff}} = K/\tau$, inflating $K$ by $\tau$.
+     </details>
+
+     </details>
+   - **Median statistic — K_median = M(p, δ_abs, g)**, where **p** = the quantile level (0.5 for the median; set by choosing the statistic), **δ_abs** = the within-window noise tolerance in scale units, SE(m̂) ≤ δ_abs·σ (pre-committed, derived from alarm sensitivity — never picked arbitrarily), and **g** = f(m)·σ, the normalized density at the quantile (inherited from the baseline: estimated via f̂(m)·σ̂ or a robust scale; g = 0.3989 under the normal reference):
+     <details>
+     <summary><strong>The full derivation, folded — why the window median's SE = 1.253σ/√K and K_needed = (c_0.5/δ_abs)², step by step</strong></summary>
+
+     <details>
+     <summary><strong>Step 1 — what a window median is</strong></summary>
+
+        - Window $j$ holds $K$ i.i.d. values $X_1,\ldots,X_K$ from the column's law, with population median $m$ (the point where $F(m) = 0.5$, F: CDF) and density $f$, requiring $f(m) > 0$.
+        - The statistic: the sample median — the middle order statistic $X_{((K+1)/2)}$ (average of the two middle values for even $K$) — one estimate of $m$ per window.
+     </details>
+
+     <details>
+     <summary><strong>Step 2 — why its SE is NOT σ/√K (order statistic, not an average)</strong></summary>
+
+        - The mean averages *values*; the median is a *rank* — it only counts which side of $m$ each value falls on.
+        - The number of values $\le x$ in a window is $N(x) \sim \mathrm{Binomial}(K, F(x))$ — a count.
+          - the random variable $\mathcal{N}(x)$ is: out of `K` numbers (`K` independent trials), how many are less than or equal to x. \
+         Hence, this RV will naturally be binomially distributed.
+          - now, the individual success probability event - what is the probability of a drawn number being $\le x$.
+          - hence, this is a CDF probability term, i.e. $F(x)$
+        - Event identity: the sample median $\le x \iff N(x) \ge K/2$.
+        - At $x = m$ (m: population median): $N(m) \sim \mathrm{Binomial}(K, 0.5)$ → count noise $= \sqrt{K\cdot 0.5\cdot 0.5} = \sqrt K / 2$.
+          - $F(m) = 0.5$ because for any prob distro., half of its values will be less than median, hence `CDF` at this point will be `0.5`.
+          - **Where Var(N(x)) comes from — decompose into K indicators:** $N(x) = \sum_{i=1}^{K} Z_i$ with $Z_i = \mathbf 1\{\text{value } i \le x\}$ — each $Z_i$ is a Bernoulli with success probability $p = F(x)$.
+          - **Bernoulli variance from first principles:** $Z_i \in \{0,1\} \Rightarrow Z_i^2 = Z_i$, so $E[Z_i] = p$ and $E[Z_i^2] = p$, giving $\mathrm{Var}(Z_i) = E[Z_i^2] - E[Z_i]^2 = p - p^2 = p(1-p)$.
+          - **Summing over the window (independence):** covariances vanish and variances add: $\mathrm{Var}(N(x)) = \sum_i \mathrm{Var}(Z_i) = K\,p(1-p) = K\,F(x)(1-F(x))$ — the textbook binomial variance $Kp(1-p)$, recovered from first principles.
+          - **Plugging $x = m$:** the median is *defined* by $F(m) = 0.5$, so $\mathrm{Var}(N(m)) = K\cdot 0.5\cdot(1-0.5) = K\cdot 0.5\cdot 0.5 = K/4$, hence count noise $= \sqrt{K/4} = \sqrt K/2$; the mean is $E[N(m)] = K\cdot 0.5 = K/2$ — on average half the window's values lie at or below $m$.
+          - **Structural remark:** $p(1-p)$ peaks at $p = 0.5$ with value $1/4$ — the median is where count noise is largest in absolute terms — and the $\sqrt K/2$ is precisely the count noise that the next bullet divides by $f(m)$ to get the median's value-scale SE.
+        - **Convert count noise into value noise — the full chain, in chronological order.** The count noise lives in *count* units, so it cannot be multiplied by $1/f(m)$ directly. The proper route: derive the count noise → recognize the empirical CDF as the object it feeds → normalize by $K$ to get probability-scale noise → convert probability noise to value noise through the inverse-CDF slope $1/f(m)$ → assemble:
+          - **Deriving Var(N(x)) from the Bernoulli sum — the count noise.** $N(x) = \sum_{i=1}^{K} Z_i$ with $Z_i = \mathbf 1\{\text{value } i \le x\}$ Bernoulli with success probability $p = F(x)$; $\mathrm{Var}(Z_i) = p(1-p)$, and independence makes variances add: $\mathrm{Var}(N(x)) = K\,p(1-p)$. At $x = m$ ($F(m) = 0.5$): $\mathrm{Var}(N(m)) = K\cdot 0.5\cdot 0.5 = K/4$ ⇒ count noise $= \sqrt{K/4} = \sqrt K/2$.
+          - **The empirical CDF — the sample estimate $\widehat F(x) = N(x)/K$.** $\widehat F$ is the window's own estimate of the true CDF $F$: the *observed* fraction of the $K$ sampled values $\le x$. Each value is $\le x$ with true probability $F(x)$, so $\widehat F(x)$ is a binomial proportion with mean $F(x)$ and $\mathrm{SE} = \sqrt{F(x)(1-F(x))/K}$; at $x = m$ it hovers around $0.5$ and converges to $F$ as $K$ grows.
+          - **Layer 1 — noise in probability units (divide the count noise by K).** The empirical-CDF error at $m$ is the count noise normalized by $K$: $\mathrm{SE}\big(\widehat F(m)\big) = \frac{\sqrt K/2}{K} = \sqrt{\frac{p(1-p)}{K}}\Big|_{p=0.5} = \frac{1}{2\sqrt K}$ — a dimensionless, probability-scale noise. (This is the step the naive "count noise $\times 1/f(m)$" phrasing skipped.)
+          - **The quantile function and the inverse-function theorem — where $1/f(m)$ comes from.** $Q(u) = F^{-1}(u)$ maps probability $u$ to the value where the CDF reaches $u$ ($Q(0.5) = m$). Differentiate the identity $F(Q(u)) = u$ by the chain rule: $F'\big(Q(u)\big)\cdot Q'(u) = 1$ ⇒ $Q'(u) = 1/f\big(Q(u)\big)$; at $u = 0.5$: $Q'(0.5) = 1/f(m)$. The density's reciprocal is the exchange rate between probability units and value units.
+          - **Probability wobble → value wobble (vertical offset ÷ slope).** $\hat m$ is where $\widehat F$ crosses $1/2$, so a probability-scale error $\delta u$ at $m$ shifts the crossing horizontally by $\delta u \div f(m)$ — the slope of $F$ at $m$ is $f(m)$, hence value noise $\approx \delta u / f(m)$. This is the delta method applied to the inverse map: $\mathrm{SE}\big(g(\hat\theta)\big) \approx |g'|\cdot\mathrm{SE}(\hat\theta)$ with $g = Q$.
+          - **Layer 3 — assemble.** $\mathrm{SE}(\hat m) \approx \mathrm{SE}\big(\widehat F(m)\big) \times \frac{1}{f(m)} = \frac{\sqrt K/2}{K\,f(m)} = \frac{\sqrt{p(1-p)}}{f(m)\sqrt K} = \frac{1}{2\,f(m)\sqrt K}$ — which the Normal-parent bullet below evaluates for a Gaussian parent.
+        - Normal parent: $f(m) = \frac{1}{\sigma\sqrt{2\pi}} = \frac{0.3989}{\sigma}$ ⇒ $\mathrm{SE}(\hat m) \approx \frac{\sigma\cdot 1.2533}{\sqrt K}$ with $1.2533 = \frac{0.5}{0.3989} = \sqrt{\pi/2}$.
+        - The intuition: each value contributes only a bit (which side of the median), not its whole magnitude — robust to outliers, but information-poorer per row.
+     </details>
+
+     <details>
+     <summary><strong>Step 3 — tolerance framing for the median</strong></summary>
+
+        - SE is in value units; the clean dimensionless framing for quantiles is σ-units (or a robust scale — IQR/1.349, MAD — when tails are heavy): $\mathrm{SE}(\hat m) \le \delta_{\mathrm{abs}}\cdot\sigma$.
+        - A relative-to-$m$ framing exists for ratio-scale data but is less natural — the median is chosen precisely when the scale is unstable, so σ-units with a robust scale is the honest default.
+     </details>
+
+     <details>
+     <summary><strong>Step 4 — why a constant factor c_p appears (contrast with the mean)</strong></summary>
+
+        - Mean: $\mathrm{SE} = \sigma/\sqrt K$ → factor $c = 1$; it uses full magnitudes, and only CV enters.
+        - Median: $\mathrm{SE} = \sigma\, c_{0.5}/\sqrt K$ with $c_{0.5} = \frac{\sqrt{p(1-p)}}{\varphi(z_p)} = \frac{0.5}{\varphi(0)} = \frac{0.5}{0.3989} = 1.2533$ — count noise $0.5$ times the inverse density $\sqrt{2\pi} \approx 2.507$.
+        - Consequence: at equal σ-relative precision the median needs $(1.2533)^2 \approx 1.57\times$ the mean's rows — the price of robustness (magnitudes discarded).
+     </details>
+
+     <details>
+     <summary><strong>Step 5 — why K_needed = (c/δ_abs)²</strong></summary>
+
+        - Budget: $\mathrm{SE}(\hat m) \le \delta_{\mathrm{abs}}\,\sigma$ ⇒ $\frac{\sigma\,c_{0.5}}{\sqrt K} \le \delta_{\mathrm{abs}}\sigma$ ⇒ $K_{\mathrm{needed}} = \Big\lceil\Big(\frac{c_{0.5}}{\delta_{\mathrm{abs}}}\Big)^2\Big\rceil$.
+        - Worked ($\delta_{\mathrm{abs}} = 0.25\sigma$): median $K = (1.2533/0.25)^2 = (5.01)^2 \approx 26$ rows; the mean at the same budget needs $K = (1/0.25)^2 = 16$.
+        - General quantile form: $c_p = \sqrt{p(1-p)}/\varphi(z_p)$; p95 has $c = 2.113$ ⇒ $K = 72$ at $\delta = 0.25\sigma$ — extreme quantiles cost ~2.84× the median's rows because the tail density $\varphi(1.645) \approx 0.103$ is ~4× thinner.
+        - Floor: the target rank must be interior and $K\cdot\min(p,1-p)$ not tiny.
+     </details>
+
+     <details>
+     <summary><strong>Step 6 — when the chain breaks (and where the median wins)</strong></summary>
+
+        - **Where the median wins:** its SE needs only local regularity ($f(m) > 0$) — never finite variance — so infinite-variance/heavy-tailed columns (α ≤ 2 Pareto), where the mean has no CLT at all, are exactly where the median is the right statistic.
+        - **Where it breaks:** ties/discreteness — if values quantize so a point mass sits at $m$, $f(m)$ is ill-defined and the estimator snaps between tied values (use the exact binomial instead); a flat middle makes $f(m)$ tiny → SE explodes; autocorrelated rows shrink $n_{\mathrm{eff}}$ exactly as for the mean (inflate $K$ by $\tau$).
+     </details>
+
+     </details>
+   - **pX percentile statistics (p5, p25, p50, p75, p90, p95) — the same derivation as the median; only the value of p changes.** Every step of the median fold above applies unchanged to any quantile: the count $N(x) \sim \mathrm{Binomial}(K,\, p)$ at the crossing, the empirical-CDF layer, the inverse-CDF slope $1/f(q_p)$, the delta-method assembly — the median is simply the $p = 0.5$ case. With $p$ come two dial changes: the count-noise factor $\sqrt{p(1-p)}$ in the numerator and the density at the quantile $f(q_p)$ in the denominator — the latter dominating, since extreme quantiles sit in sparse-density regions. The general window size is $K_p = (c_p/\delta_{\mathrm{abs}})^2$ in σ-units (normal reference, $c_p = \sqrt{p(1-p)}/\varphi(z_p)$), and $p$ also sets the interiority floors ($p$ near 0 or 1 needs $K\cdot\min(p, 1-p) \gtrsim 5$).
+      - **p5: c_p ≈ 2.113 ⇒ K_needed = (2.113/δ_abs)²** — ≈ 72 rows at δ_abs = 0.25σ
+      - **p25: c_p ≈ 1.363 ⇒ K_needed = (1.363/δ_abs)²** — ≈ 30 rows at δ_abs = 0.25σ
+      - **p50 (median): c_p ≈ 1.253 ⇒ K_needed = (1.253/δ_abs)²** — ≈ 26 rows at δ_abs = 0.25σ
+      - **p75: c_p ≈ 1.363 ⇒ K_needed = (1.363/δ_abs)²** — ≈ 30 rows at δ_abs = 0.25σ
+      - **p90: c_p ≈ 1.710 ⇒ K_needed = (1.710/δ_abs)²** — ≈ 47 rows at δ_abs = 0.25σ
+      - **p95: c_p ≈ 2.113 ⇒ K_needed = (2.113/δ_abs)²** — ≈ 72 rows at δ_abs = 0.25σ
+
+   - **missingness rate**
+     <details>
+     <summary><strong>missingness rate — how this statistic is chosen w.r.t. its baseline, step by step</strong></summary>
+
+        - **Step 1 — the per-window statistic.** Each window over the known-good period has $K$ rows (the volume count of that window), of which $X$ are missing:
+           - $\hat p = X/K$, with $X \sim \mathrm{Binomial}(K,\, p)$ and $p$ = the column's true missing probability.
+           - Result: the baseline array $\{\hat p_1, \ldots, \hat p_{n_{\mathrm{win}}}\}$ — the same "distribution of the statistic" template as the mean.
+        - **Step 2 — choose the window width against the baseline rate (the sizing story).**
+           - Count noise is $\sqrt{\text{count}}$, so the relative noise of $\hat p$ is $\approx 1/\sqrt{Kp}$.
+              - **Setup (all assumptions stated, nothing hidden):** $X$ = number of missing rows = $\sum_{i=1}^{K} Z_i$, where $Z_i = \mathbf 1\{\text{row } i \text{ is missing}\}$. Assumptions: (i) each row is missing independently of the others, with the *same* probability $p$ (i.i.d. Bernoulli rows); (ii) $K$ is fixed (the window's row count); (iii) $p \in (0,1]$ (positive, so the division by $p$ in Step D is legitimate) and is constant within the window.
+              - **Step A — variance of one Bernoulli (no independence needed here):** $Z_i \in \{0,1\} \Rightarrow Z_i^2 = Z_i$, so $E[Z_i] = p$ and $E[Z_i^2] = p$; hence $\mathrm{Var}(Z_i) = E[Z_i^2] - E[Z_i]^2 = p - p^2 = p(1-p)$.
+              - **Step B — variance of the count (independence enters here):** expand the variance of the sum, $\mathrm{Var}(X) = \sum_i \mathrm{Var}(Z_i) + 2\sum_{i<j}\mathrm{Cov}(Z_i, Z_j)$; independence (assumption i) zeroes every covariance, so $\mathrm{Var}(X) = K\,p(1-p)$, and the count noise is $\mathrm{SD}(X) = \sqrt{K\,p(1-p)}$ — "noise $\approx \sqrt{\text{expected count}}$" once $p$ is small (Step E).
+              - **Step C — noise of the rate $\hat p$:** $\hat p = X/K$ with $K$ fixed (assumption ii), and scaling by a constant divides the sd by that constant: $\mathrm{SE}(\hat p) = \mathrm{SD}(X)/K = \sqrt{K p(1-p)}/K = \sqrt{\frac{p(1-p)}{K}}$.
+              - **Step D — relative noise of the rate:** divide the SE by the rate itself: $\frac{\mathrm{SE}(\hat p)}{p} = \frac{\sqrt{p(1-p)/K}}{p} = \sqrt{\frac{p(1-p)}{K p^2}} = \sqrt{\frac{1-p}{Kp}}$.
+              - **Step E — the small-p simplification (the only approximation, stated explicitly):** missingness is a rare event, so $p \ll 1$ and $(1-p) \approx 1$; this gives $\frac{\mathrm{SE}(\hat p)}{p} \approx \frac{1}{\sqrt{Kp}} = \frac{1}{\sqrt{E[X]}}$, where $E[X] = \sum_i E[Z_i] = Kp$ by linearity of expectation (Setup + Step A; no independence needed) — identical to the relative noise of the count itself, $\frac{\mathrm{SD}(X)}{E[X]} = \frac{\sqrt{Kp(1-p)}}{Kp} \approx \frac{1}{\sqrt{Kp}}$, because $K$ is fixed.
+           - For the 10× rule to fire reliably and the baseline not to be garbage: $Kp \approx 10\text{–}25$ (baseline good to ~20–30% relative):
+             $K \approx \frac{1}{p\,\delta_{\mathrm{rel}}^2}$ ⇒ $K \approx 2{,}475$ at $p = 1\%$, $\approx 25{,}000$ at $p = 0.1\%$.
+           - Consequence: rare missingness forces large windows (hours–days) or aggregated windows.
+           - $K$ is the volume count and varies per window → compare only same-slice/similar-$K$ windows; empty windows ($K=0$) give no $\hat p$; tiny-$K$ windows give lattice garbage ($K = 50$, $p = 1\%$: ~60% of windows report 0).
+        - **Step 3 — estimate the baseline rate $\hat p_0$ from the array.** Pooled rate (total missing ÷ total rows) or mean of the per-window $\hat p$'s, with sanity checks:
+           - No drift in the array, no volume dips contaminating windows.
+           - Keep $\hat p_0$ away from 0: if the baseline is zero-missing, $10\times 0 = 0$ makes the *first* missing row alarm forever — the empty-window probability is $e^{-Kp}$, so $Kp \gtrsim 10$ keeps the baseline non-degenerate (or floor the rule: alert on $\max(10\,\hat p_0,\ \text{absolute floor})$).
+        - **Step 4 — pre-commit the alarm rule.** Alert when the current window's rate exceeds the pre-committed factor, for ≥ 3 consecutive windows (the module's run discipline):
+           - $\text{alert if } \hat p_{\text{current}} > 10\times \hat p_0 \ \ (\ge 3 \text{ consecutive windows})$.
+           - Direction semantics: rate rising ≫10× = upstream stopped populating the field (fix upstream); rate collapsing toward ~0 = a previously-optional field is now always filled (behavior change — verify it is benign).
+        - **Step 5 — seasonality.** Same per-slice fix: baseline and current rates are compared within the same (day × hour) slice, so daily missingness rhythms (e.g., an overnight batch omitting a field) don't masquerade as drift.
+     </details>
 3. Describe it: its mean μ and standard deviation σ (or empirical percentiles).
 4. Set thresholds:
    - *Point statistic:* alert if the current value is outside **μ ± k·σ** (k = 3) for ≥ 3 consecutive windows.
@@ -766,6 +913,17 @@ flowchart TB
    - *Cardinality:* alert if (current distinct count ÷ baseline distinct count) > 2 (vocabulary grew) or → 1 (column went constant = feed broke).
    - *Missingness:* alert if the missing rate exceeds 10× the baseline rate.
 5. Apply the same seasonality fix (per time-slice baseline).
+
+   - **Sizing the statistic window — rows per window (K) each statistic needs** for a chosen tolerance (δ = the tolerance, σ = value-level sd, p = share/rate; σ and μ are population parameters, replaced by their baseline estimates in practice):
+
+     | statistic (col type) | SE of window stat | K_needed | what drives it |
+     |---|---|---|---|
+     | mean (num) | σ/√K | (CV/δ_rel)² | CV = σ/μ |
+     | median / p95 (num) | σ·c_p/√K (1.25 / 2.11) | (c_p/δ_abs)² | density at quantile |
+     | std dev (num) | σ/√(2K) | 1/(2δ²) [×(β₂−1)/2] | kurtosis, not μ |
+     | missing rate (num+cat) | √(p(1−p)/K) | ≈1/(p·δ_rel²) | expected missing count Kp |
+     | top-k share (cat) | √(P(1−P)/K) | P(1−P)/δ_abs² | dominance of top mass |
+     | cardinality (cat) | — (rarefaction) | K ≥ ln(1/α)/p | rare-value visibility |
 
 **The judgment runbook.**
 1. Which column, which statistic, which direction.
@@ -775,6 +933,8 @@ flowchart TB
 5. Re-baseline (legit change) or fix the feed (corrupt).
 
 **Worked example.** `amount` mean = 45.2 ± 2.1 for 8 weeks; one week it's 89.3 (≈ 21×σ), PSI = 0.41. Raw rows show every amount doubled → the upstream switched from local currency to cents (a *units* change, invisible to a type check). Fix upstream, don't retrain.
+
+---
 
 ### Rare-value and new-value detection
 
@@ -796,6 +956,8 @@ flowchart TB
 **Worked example.** `merchant_category` has 400 codes; one day "9999" (never seen) hits 3% of rows. Human: 9999 isn't a valid merchant code — it's the upstream's "unknown" placeholder → misparse → fix upstream. Contrast: a real new code "7801" appears → legit new segment → update the register; the model will be cold on it.
 
 The principle from M15 applies here verbatim: these are **tripwires, not verdicts**. They tell you to *look*, not to act. The action — retrain, fix the feed, re-pin a feature — comes only after diagnosis.
+
+---
 
 ### Bonferroni correction (many simultaneous tests)
 
