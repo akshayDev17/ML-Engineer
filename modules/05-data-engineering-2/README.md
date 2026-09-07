@@ -952,6 +952,37 @@ flowchart TB
            | row_stationarity (first-half vs second-half means) | drifting mean inside the baseline | shorten or re-baseline the known-good stretch |
            | empirical_normality (bootstrap K-means vs ±3σ tails) | the actual tail isn't normal at finite K | don't trust the 0.135% normal claim |
            | band_consistency (empirical percentiles vs μ ± 3σ on the window-mean array) | the threshold's own across-window normality assumption | use empirical percentiles of the window-mean array |
+         - **The mean statistic — operational flowchart (no derivations):**
+
+           ```mermaid
+           flowchart TB
+               subgraph BASE["Baseline"]
+                   WM["window means x̄₁ … x̄_{n_win}<br/>(n_win = T_col / w)"]
+                   MU["μ_stat = mean(x̄₁ … x̄_{n_win})"]
+                   SIG["σ_stat = sd(x̄₁ … x̄_{n_win})"]
+               end
+               G{"CLT guard: finite variance,<br/>|r̂₁| ≤ 2/√N,<br/>K sufficient, stationary?"}
+               BAND["UCL = μ_stat + 3σ_stat<br/>LCL = μ_stat − 3σ_stat"]
+               PERC["empirical percentile band<br/>(0.135th–99.865th)"]
+               CUR["current window mean x̄_cur"]
+               COMP{"x̄_cur outside band?"}
+               RUN["run rule: ≥3 consecutive same-side"]
+               HOLD["hold"]
+               ALERT["fire alert"]
+
+               WM --> MU
+               WM --> SIG
+               MU --> BAND
+               SIG --> BAND
+               G -->|"pass"| BAND
+               G -->|"fail"| PERC
+               BAND --> COMP
+               PERC --> COMP
+               CUR --> COMP
+               COMP -->|"no"| HOLD
+               COMP -->|"yes: above UCL = rise, below LCL = drop"| RUN
+               RUN --> ALERT
+           ```
          </details>
       - **median / percentile (pX) statistic**
          <details>
@@ -988,6 +1019,34 @@ flowchart TB
            - This is the source of the $c_p/\sqrt K$ law that sized K and of the ≈normal shape of each window estimate.
            - Conditions: continuous data with $f(q_p) > 0$ — ties/discreteness break it (the median fold's Step-6 caveats).
            - The other two ingredients are unchanged: the band-spread is a normal *model* of drift, and the run rule is independence/combinatorics.
+         - **The median statistic — operational flowchart (no derivations):**
+
+           ```mermaid
+           flowchart TB
+               subgraph BASE["Baseline"]
+                   WM["window medians m̂₁ … m̂_{n_win}"]
+                   MU["μ_stat = median (or mean) of m̂'s"]
+                   SIG["σ_stat = robust spread of m̂'s<br/>(MAD, or IQR/1.349)"]
+               end
+               BAND["UCL/LCL = μ_stat ± 3σ_stat"]
+               PERC["empirical percentile band (preferred)"]
+               CUR["current window median m̂_cur"]
+               COMP{"m̂_cur outside band?"}
+               RUN["run rule: ≥3 consecutive same-side"]
+               HOLD["hold"]
+               ALERT["fire alert"]
+
+               WM --> MU
+               WM --> SIG
+               MU --> BAND
+               SIG --> BAND
+               BAND --> COMP
+               PERC --> COMP
+               CUR --> COMP
+               COMP -->|"no"| HOLD
+               COMP -->|"yes"| RUN
+               RUN --> ALERT
+           ```
          </details>
       - **missingness rate**
          <details>
@@ -1020,7 +1079,124 @@ flowchart TB
          - **Math justification — the comparison's noise layer.**
            - The comparison is valid only where the binomial CLT holds for each $\hat p$: $Kp$ and $K(1-p)$ ≳ 5–10.
            - The ratio's resolvability is set by the relative noise $\approx 1/\sqrt{Kp}$ derived in the Collect fold — the threshold layer inherits its resolution from the K-sizing layer.
+         - **The missingness rate statistic — operational flowchart (no derivations):**
+
+           ```mermaid
+           flowchart TB
+               P0["baseline rate p̂₀ = missing rows ÷ total rows<br/>(pooled, or mean of per-window p̂)"]
+               FLOOR["guard: if p̂₀ = 0, use floor max(10·p̂₀, absolute floor)"]
+               CUR["current window p̂_cur = X/K"]
+               NOISE{"K comparable & Kp ≥ 5<br/>(same-slice / similar volume)?"}
+               THRESH{"p̂_cur > 10 × p̂₀?"}
+               RUN["run rule: ≥3 consecutive windows"]
+               HOLD["insufficient volume / not comparable"]
+               ALERT["fire alert"]
+
+               P0 --> FLOOR
+               CUR --> NOISE
+               NOISE -->|"no"| HOLD
+               NOISE -->|"yes"| THRESH
+               FLOOR --> THRESH
+               THRESH -->|"no"| HOLD
+               THRESH -->|"yes"| RUN
+               RUN --> ALERT
+           ```
          </details>
+   - *Distribution (rigorous):* **PSI** (population stability index) — the value-distribution drift rule: compares the current period's binned value shares against the baseline profile.
+     <details>
+     <summary><strong>PSI — why the alert rule is χ²-based, derived step by step</strong></summary>
+
+        - **The null and what PSI measures.** Under $H_0$ the observation period's value distribution equals the baseline distribution. PSI is the symmetric Kullback–Leibler divergence between the two share vectors: $\mathrm{PSI} = \sum_b (a_b - e_b)\ln(a_b/e_b)$, where $a_b$ = observation share of bin $b$ and $e_b$ = baseline share of bin $b$.
+        - **Step 1 — fix the bins on the baseline (edges are frozen numbers).**
+           - Edge rule: take baseline quantiles $q_{0.05}, q_{0.10}, \ldots, q_{0.95}$ (B equal-frequency bins); bin₁ = $x \le q_{0.05}$, bin_b = $(q_{b-1},\, q_b]$, bin_B = $x > q_{0.95}$ — the two outer bins are open-ended half-lines.
+           - Expected-count rule: every retained bin must hold $\ge 5$ (ideally $\ge 10$) baseline rows; merge sparser bins into "other"; $B \le N_e/5$ (the 0.05-step list gives $B = 20$; any $B$ with $B \le N_e/5$ works).
+           - Out-of-bounds treatment: a valid value below the baseline minimum lands in bin₁, above the baseline maximum in bin_B — the mass adds to an extreme bin's share, inflating PSI (the correct drift signal); such a value is also a candidate for a separate range-gate flag.
+           - Definitions: $N_e$ = total baseline rows; $E_b$ = baseline count in bin $b$; $e_b = E_b/N_e$. The edges and $B$ are fixed once, at design time; observations never re-bin.
+        - **Step 2 — count the observation period in the same bins.** $O_b$ = observation count in bin $b$ over the same frozen edges; $N_o = \sum_b O_b$; $a_b = O_b/N_o$.
+        - **Step 3 — the χ² decision route.** Scale the baseline shares to the observation total: $E'_b = N_o\,e_b = N_o\,E_b/N_e$, so $e_b = E'_b/N_o$. Pearson homogeneity statistic: $\chi^2_{\mathrm{obs}} = \sum_b (O_b - E'_b)^2/E'_b$. Fire when $\chi^2_{\mathrm{obs}} > \chi^2_{B-1}(1-\alpha)$ — subject to the conditions named below: the baseline is effectively exact ($N_e \gg N_o$, Step 4), the drift is near-null (Step 7), and every bin satisfies $N_o e_b \ge 5$ (ideally $\ge 10$) for the joint χ² reference. Equivalence (one-line expansion): with $a_b = e_b(1+\delta_b)$, $(a_b-e_b)\ln(a_b/e_b) = e_b[\delta_b^2 - \delta_b^3/2 + \cdots]$, and $\sum_b e_b\delta_b = 0$, so near the null $N_o\cdot\mathrm{PSI} \approx \sum_b N_o e_b\delta_b^2 = \chi^2_{\mathrm{obs}}$.
+        - **Step 4 — why χ²_obs is a sum of squared standard normals (multinomial → projection).**
+           - Under $H_0$: $O = (O_1,\dots,O_B) \sim \mathrm{Multinomial}(N_o, e)$; marginal $O_b \sim \mathrm{Binomial}(N_o, e_b)$, with $E[O_b] = N_o e_b = E'_b$ (linearity of a Bernoulli sum) and $\mathrm{Var}(O_b) = N_o e_b(1-e_b)$ (independence of rows + $Z^2=Z$).
+           - The bin counts are NOT independent: $\mathrm{Cov}(O_b, O_c) = -N_o e_b e_c$ for $b \ne c$.
+           - Standardize $Z_b = (O_b - E'_b)/\sqrt{E'_b}$; its covariance matrix is $\Sigma = I - \sqrt e\,\sqrt e^{\mathsf T}$ (diagonal $1-e_b$, off-diagonal $-\sqrt{e_b e_c}$); $\Sigma$ is idempotent of rank $B-1$.
+           - The component along $\sqrt e$ is exactly zero: $\sqrt e^{\mathsf T}Z = \sum_b (O_b - E'_b)/\sqrt{N_o} = (N_o - N_o)/\sqrt{N_o} = 0$.
+           - Hence $Q = \sum_b Z_b^2 = Z^{\mathsf T}\Sigma Z$ (using $\sqrt e^{\mathsf T}Z = 0$, so $\Sigma Z = Z$); spectral/Cochran (asymptotically, under the multivariate normality of Step 5): the sum of squares of the $B-1$ unit-variance coordinates **in the rank-$(B-1)$ subspace** (i.i.d. $N(0,1)$ after projection) ⇒ $\chi^2_{B-1}$.
+           - Throughout Step 4: $N_o$ is fixed/conditioned, the $e_b$ come from the separate baseline (not estimated from the observation window, so df $= B-1$ with no further reduction), and the observation rows are independent of the baseline rows.
+           - Baseline-exactness caveat: this χ²$_{B-1}$ reference treats the baseline shares $e_b$ as known constants, valid when the baseline is effectively exact ($N_e \gg N_o$); when $N_e$ is not $\gg N_o$, the statistic itself is scaled by $\approx (1 + N_o/N_e)$ — its mean is $\approx (1 + N_o/N_e)\cdot(B-1)$ and its variance $\approx 2(B-1)(1 + N_o/N_e)^2$ — so the χ²$_{B-1}(1-\alpha)$ threshold is anti-conservative.
+           - Why the $(1 + N_o/N_e)$ factor: both periods are independent multinomials with a common $p$ under $H_0$; with the pooled proportion $\hat p_b = (O_b + E_b)/(N_o + N_e)$, the properly normalized two-sample statistic $X^2 = \sum_b (O_b/N_o - E_b/N_e)^2/[\hat p_b(1/N_o + 1/N_e)]$ satisfies $\chi^2_{\mathrm{obs}}/X^2 \to (N_o+N_e)/N_e = 1 + N_o/N_e$, in the large-sample limit.
+           - The correct reference is then a two-sample homogeneity test, or a permutation/Monte-Carlo threshold: pool baseline + observation rows, randomly relabel $N_o$ of them as "observation" and recompute both $O_b$ and the baseline shares $e_b = E_b/N_e$ from each relabeled split (over the design-time frozen edges), repeat, and use the empirical $(1-\alpha)$ quantile — valid under exchangeability of the rows.
+           - 2-bin check: $e = (\tfrac12,\tfrac12)$ ⇒ $Z_2 = -Z_1$ exactly, $Q = 2Z_1^2 \sim \chi^2_1$.
+        - **Step 5 — where the normal comes from (CLT over the rows).**
+           - $O_b = \sum_{i=1}^{N_o} Z_i$ with $Z_i \sim \mathrm{Bernoulli}(e_b)$ i.i.d. — the cell count is a sum of row indicators.
+           - Lindeberg–Lévy: $(O_b - N_o e_b)/\sqrt{N_o e_b(1-e_b)} \to N(0,1)$ — each cell count is asymptotically normal via the row-level CLT.
+           - The whole count vector → multivariate normal via the multivariate CLT on the one-hot row vectors.
+           - Note: a single cell standardized by $\sqrt{E'_b}$ has variance $1-e_b$, not $1$ — exact unit variance appears only in the projected rank-$(B-1)$ subspace.
+           - Assumption caveat: all of this assumes i.i.d. rows; within-window autocorrelation in a time-series feed shrinks the effective sample size and breaks the multinomial variances — apply a seasonality/same-slice fix or an $n_{\mathrm{eff}}$ adjustment.
+        - **Step 6 — finite-sample assurance (Berry–Esseen).** $\sup_x |F_{N_o}(x) - \Phi(x)| \le 0.4748\,\rho_3/\sqrt{N_o}$ with $\rho_3 = E|Z-e_b|^3/\sigma^3 = (1 - 2e_b + 2e_b^2)/\sqrt{e_b(1-e_b)}$; the rate is $1/\sqrt{N_o}$. (This bounds the *marginal* per-cell normal approximation; it does not itself bound the error of the joint $Q \sim \chi^2_{B-1}$ approximation — that gap is why the exact fallback below exists.) Practical rule: $\min(N_o e_b,\ N_o(1-e_b)) \ge 5$–10. Concrete worst-case CDF error:
+           | e_b | ρ₃ | N_o = 100 | N_o = 400 | N_o = 1,600 |
+           |---|---|---|---|---|
+           | 0.50 | 1.0 | 0.047 | 0.024 | 0.012 |
+           | 0.05 | ≈ 4.15 | 0.197 | 0.099 | 0.049 |
+           When $e_b$ is tiny, the correct limit is Poisson ($\lambda = N_o e_b \ge 5$–10); otherwise fall back to exact multinomial / permutation / Monte-Carlo thresholds.
+        - **Step 7 — the natural-log route (when (a−e)²/e is invalid).** $\mathrm{PSI} = \sum_b (a_b - e_b)\ln(a_b/e_b)$ is the exact definition; the χ² identity holds only when $|a_b - e_b|/e_b \ll 1$ in every bin (near-null). Zero-count convention: if $a_b = 0$ with $e_b > 0$ (or $e_b = 0$ with $a_b > 0$), then $\ln(a_b/e_b)$ is $\mp\infty$ and the PSI summand diverges to $+\infty$ (PSI is a sum of non-negative terms); if $a_b = e_b = 0$ the term is taken as $0\cdot\ln 0 = 0$ — so pre-commit a floor — treat $0\cdot\ln 0 = 0$ and add Laplace/$\varepsilon$ smoothing (or use the χ² route, which is zero-safe) before any far-from-null log computation. Far from the null the higher-order log terms dominate, so use the log-form directly and decide with the module heuristic (PSI > 0.25 drift, 0.1–0.25 investigate) or the empirical self-PSI percentile — the χ² quantile $\chi^2_{B-1}(1-\alpha)$ is only a *near-null* reference, valid while $N_o\cdot\mathrm{PSI} \approx \chi^2_{\mathrm{obs}}$, and should not be reused as a far-null critical value. Identity: PSI = D(a‖e) + D(e‖a) — the ½ some texts quote is from the *averaged* symmetrized KL (the mean of the two directions); PSI is the sum, so it has no ½.
+        - **The PSI test — operational flowchart (no derivations):**
+
+          ```mermaid
+          flowchart TB
+              subgraph D["1 · Design time — binning (baseline only)"]
+                  BINS["Fix B bins at baseline quantiles<br/>bin1 = x ≤ q0.05 … binB = x > q0.95<br/>B ≤ Ne/5, edges frozen"]
+              end
+              subgraph B["2 · Baseline profile"]
+                  EB["E_b = # baseline rows in bin b"]
+                  NE["N_e = Σ E_b"]
+                  EBAR["e_b = E_b / N_e"]
+              end
+              subgraph O["3 · Observation"]
+                  OB["O_b = # observation rows in bin b"]
+                  NO["N_o = Σ O_b"]
+                  ABAR["a_b = O_b / N_o"]
+              end
+              subgraph G["4 · Validity gates"]
+                  G1{"N_o·e_b ≥ 5 (and E_b ≥ 5)<br/>in every bin?"}
+                  G2{"N_e ≫ N_o<br/>(baseline exact)?"}
+                  G3{"near-null:<br/>|a_b − e_b|/e_b ≪ 1<br/>every bin?"}
+              end
+              BE["5 · Berry–Esseen (side-check)<br/>ρ₃ = (1−2e_b+2e_b²)/√(e_b(1−e_b))<br/>bound = 0.4748·ρ₃/√N_o (marginal)"]
+              subgraph P["6a · Plain χ² route"]
+                  EPRIME["E'_b = N_o · e_b"]
+                  CHI["χ²_obs = Σ (O_b − E'_b)²/E'_b"]
+                  CHITH["threshold χ²_{B−1}(1−α)"]
+              end
+              subgraph L["6b · Natural-log route"]
+                  PSI["PSI = Σ (a_b − e_b) ln(a_b/e_b)<br/>(0·ln0 = 0 / ε-smoothing)"]
+                  PSITH["threshold: N_o·PSI vs χ²_{B−1}(1−α)<br/>or 0.1/0.25, or empirical percentile"]
+              end
+              ALERT["7 · Fire alert<br/>(run rule: ≥3 consecutive periods)"]
+              FIX["merge bins / insufficient volume"]
+              PERM["two-sample homogeneity test<br/>or permutation/Monte-Carlo"]
+
+              BINS --> EB
+              EB --> NE
+              EB --> EBAR
+              OB --> NO
+              OB --> ABAR
+              EBAR --> G1
+              NO --> G1
+              G1 -->|"no"| FIX
+              G1 -->|"yes"| G2
+              BE -.-> G2
+              G2 -->|"no"| PERM
+              G2 -->|"yes"| G3
+              G3 -->|"yes (near-null)"| EPRIME
+              G3 -->|"no (far-null)"| PSI
+              EPRIME --> CHI
+              CHI --> CHITH
+              CHITH -->|"fire if χ²_obs > χ²_{B−1}(1−α)"| ALERT
+              EBAR --> PSI
+              ABAR --> PSI
+              PSI --> PSITH
+              PSITH -->|"fire if N_o·PSI > χ²_{B−1}(1−α) or PSI > 0.25"| ALERT
+          ```
+     </details>
 5. Apply the same seasonality fix (per time-slice baseline).
 
    - **Sizing the statistic window — rows per window (K) each statistic needs** for a chosen tolerance (δ = the tolerance, σ = value-level sd, p = share/rate; σ and μ are population parameters, replaced by their baseline estimates in practice):
