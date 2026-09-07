@@ -884,7 +884,7 @@ flowchart TB
       - **p90: c_p ≈ 1.710 ⇒ K_needed = (1.710/δ_abs)²** — ≈ 47 rows at δ_abs = 0.25σ
       - **p95: c_p ≈ 2.113 ⇒ K_needed = (2.113/δ_abs)²** — ≈ 72 rows at δ_abs = 0.25σ
 
-   - **missingness rate**
+   - **Missingness rate**
      <details>
      <summary><strong>missingness rate — how this statistic is chosen w.r.t. its baseline, step by step</strong></summary>
 
@@ -917,61 +917,70 @@ flowchart TB
      </details>
 3. Describe it: its mean μ and standard deviation σ (or empirical percentiles).
 4. Set thresholds:
-   - **mean statistic**
-     <details>
-     <summary><strong>mean statistic — the thresholds for the current window, and why</strong></summary>
+   - ***Point Statistics***
+      - **mean statistic**
+         <details>
+         <summary><strong>mean statistic — the thresholds for the current window, and why</strong></summary>
 
-        - **UCL and LCL — the thresholds.** 
-          - The reference is a band, not a single number: $\mathrm{UCL} = \mu_{\mathrm{stat}} + k\,\sigma_{\mathrm{stat}}$ and $\mathrm{LCL} = \mu_{\mathrm{stat}} - k\,\sigma_{\mathrm{stat}}$ (k pre-committed; module default k = 3). 
-          - A current window mean outside the band is a candidate anomaly.
-        - **μ_stat — the center (the "mean of means").** 
-          - From the baseline array of window means $\{\bar x_1, \ldots, \bar x_{n_{\mathrm{win}}}\}$: $\mu_{\mathrm{stat}}$ = the mean of that array. 
-          - The center alone cannot define "too far" — half of healthy windows sit above it by noise.
-        - **σ_stat — the between-window spread (what the k·σ term needs).** 
-          - $\sigma_{\mathrm{stat}}$ = the standard deviation *across* the baseline window-mean array: how much the window mean legitimately wanders window-to-window in the known-good period. 
-          - It mixes genuine day-to-day drift with the within-window sampling noise $\sigma_{\mathrm{col}}/\sqrt K$ — which is exactly why layer-1 K sizing matters: window noise inflates $\sigma_{\mathrm{stat}}$ and widens the band.
-          - Naming trap: $\sigma_{\mathrm{stat}}$ (spread of *window means*) ≠ $\sigma_{\mathrm{col}}$ (spread of *row values*, used in CV).
-        - **Why k = 3, and what σ_stat buys.** 
-          - Window means are approximately normal across windows, so ±3σ_stat contains ≈ 99.7% of healthy windows → a single out-of-band crossing is ≈ 0.3% per side *by construction*. 
-          - σ_stat is what separates "off-center" from "off-center beyond what healthy windows do" — without it, "above the baseline mean" would fire on ~half of all healthy windows. 
-          - Distribution-free floor: Chebyshev gives ≥ 1 − 1/k² = 88.9% for any distribution; the empirical-percentile band is the assumption-free alternative.
-        - **The correctly stated rule.**
-          1. Baseline: compute μ_stat and σ_stat from the n_win window means.
-          2. Pre-commit k = 3 and the run rule.
-          3. Observation period: compare each current window mean to the band — a rise sits above UCL, a drop below LCL — and fire the alert when ≥ 3 consecutive windows are on the same side of the band.
-        - **Math justification — Ingredient 1 of the rule (CLT over the rows).** 
-          - Each window mean $\bar x_i$ is the mean of K i.i.d. rows; by the Lindeberg–Lévy CLT (finite variance, large K): $\bar x_i \approx N\big(\mu_{\mathrm{col}},\, \sigma_{\mathrm{col}}^2/K\big)$ — the source of the 1/√K noise law that sized K (layer 1) and of the ≈normal shape of each window estimate. 
-          - The other two ingredients: the ±k·σ band itself is a *normal model* of between-window drift, not a theorem; 
-          - the ≥ 3-consecutive run rule rests on independence/combinatorics, like the volume N-of-M rule.
-     </details>
-   - **median / percentile (pX) statistic**
-     <details>
-     <summary><strong>median / percentile (pX) — the thresholds for the current window, and why</strong></summary>
+         - **UCL and LCL — the thresholds.**
+           - The reference is a band, not a single number: $\mathrm{UCL} = \mu_{\mathrm{stat}} + k\,\sigma_{\mathrm{stat}}$ and $\mathrm{LCL} = \mu_{\mathrm{stat}} - k\,\sigma_{\mathrm{stat}}$ (k pre-committed; module default k = 3).
+           - A current window mean outside the band is a candidate anomaly.
+         - **μ_stat — the center (the "mean of means").**
+           - From the baseline array of window means $\{\bar x_1, \ldots, \bar x_{n_{\mathrm{win}}}\}$: $\mu_{\mathrm{stat}}$ = the mean of that array.
+           - The center alone cannot define "too far" — half of healthy windows sit above it by noise.
+         - **σ_stat — the between-window spread (what the k·σ term needs).**
+           - $\sigma_{\mathrm{stat}}$ = the standard deviation *across* the baseline window-mean array: how much the window mean legitimately wanders window-to-window in the known-good period.
+           - It mixes genuine day-to-day drift with the within-window sampling noise $\sigma_{\mathrm{col}}/\sqrt K$ — which is exactly why layer-1 K sizing matters: window noise inflates $\sigma_{\mathrm{stat}}$ and widens the band.
+           - Naming trap: $\sigma_{\mathrm{stat}}$ (spread of *window means*) ≠ $\sigma_{\mathrm{col}}$ (spread of *row values*, used in CV).
+         - **Why k = 3, and what σ_stat buys.**
+           - Window means are approximately normal across windows, so ±3σ_stat contains ≈ 99.7% of healthy windows → a single out-of-band crossing is ≈ 0.3% per side *by construction*.
+           - σ_stat is what separates "off-center" from "off-center beyond what healthy windows do" — without it, "above the baseline mean" would fire on ~half of all healthy windows.
+           - Distribution-free floor: Chebyshev gives ≥ 1 − 1/k² = 88.9% for any distribution; the empirical-percentile band is the assumption-free alternative.
+         - **The correctly stated rule.**
+           - Baseline: compute μ_stat and σ_stat from the n_win window means.
+           - Pre-commit k = 3 and the run rule.
+           - Observation period: compare each current window mean to the band — a rise sits above UCL, a drop below LCL — and fire the alert when ≥ 3 consecutive windows are on the same side of the band.
+         - **Math justification — Ingredient 1 of the rule (CLT over the rows).**
+           - Each window mean $\bar x_i$ is the mean of K i.i.d. rows; by the Lindeberg–Lévy CLT (finite variance, large K): $\bar x_i \approx N\big(\mu_{\mathrm{col}},\, \sigma_{\mathrm{col}}^2/K\big)$ — the source of the 1/√K noise law that sized K (layer 1) and of the ≈normal shape of each window estimate.
+           - The other two ingredients are not CLT: the ±k·σ band itself is a *normal model* of between-window drift (not a theorem), and the ≥ 3-consecutive run rule rests on independence/combinatorics, like the volume N-of-M rule.
+         - **The CLT guard — checks so the normal window-mean assumption is never taken blindly.** Each check's verdict decides whether the normal μ ± k·σ threshold band is trustworthy; a FAIL flips the threshold mode to the alternative stated:
+           | check | CLT fail-condition it catches | if it fails |
+           |---|---|---|
+           | finite_variance (kurtosis; sd vs MAD/IQR ratio) | infinite / heavy variance (α ≤ 2 Pareto, Cauchy) | don't use the mean at all — switch to median/pX |
+           | row_independence (lag-1 autocorrelation of rows within the 2/√N band) | dependence ⇒ n_eff = K/τ < K | size on n_eff, or compare same-slice rows |
+           | K_sufficient (Berry–Esseen ρ₃ bound) | small K / heavy-but-finite tails | widen the windows (bigger K) |
+           | row_stationarity (first-half vs second-half means) | drifting mean inside the baseline | shorten or re-baseline the known-good stretch |
+           | empirical_normality (bootstrap K-means vs ±3σ tails) | the actual tail isn't normal at finite K | don't trust the 0.135% normal claim |
+           | band_consistency (empirical percentiles vs μ ± 3σ on the window-mean array) | the threshold's own across-window normality assumption | use empirical percentiles of the window-mean array |
+         </details>
+      - **median / percentile (pX) statistic**
+         <details>
+         <summary><strong>median / percentile (pX) — the thresholds for the current window, and why</strong></summary>
 
-        - **UCL / LCL — the thresholds.**
+         - **UCL / LCL — the thresholds.**
            - The reference is a band, not a single number: $\mathrm{UCL} = \mu_{\mathrm{stat}} + k\,\sigma_{\mathrm{stat}}$, $\mathrm{LCL} = \mu_{\mathrm{stat}} - k\,\sigma_{\mathrm{stat}}$.
            - k is pre-committed; module default k = 3.
            - A current window's quantile outside the band is a candidate anomaly.
-        - **μ_stat — the center.**
+         - **μ_stat — the center.**
            - Build the baseline array $\{\hat m_1, \ldots, \hat m_{n_{\mathrm{win}}}\}$ — one window quantile per window (p50 → medians; p95 → p95s).
            - μ_stat = the mean (or median) of that array — the reference level for the current window.
-        - **σ_stat — the between-window spread.**
+         - **σ_stat — the between-window spread.**
            - σ_stat = the spread *across* that array: how much the window quantile legitimately wanders window-to-window in the known-good period.
            - It mixes genuine day-to-day drift with the within-window quantile noise $\sqrt{p(1-p)}/\big(f(q_p)\sqrt K\big)$ — the layer-1 link: window noise inflates σ_stat and widens the band.
            - Naming trap: σ_stat (spread of *window quantiles*) ≠ σ_col (spread of *row values*).
-        - **Why k = 3, and what σ_stat buys — with the pX caveat.**
+         - **Why k = 3, and what σ_stat buys — with the pX caveat.**
            - k = 3 and the ≥ 3-consecutive run rule carry over unchanged from the mean.
            - σ_stat separates "off-center" from "beyond healthy fluctuation."
            - The pX caveat: the across-window distribution of quantile estimates is even less guaranteed to be normal than the mean's — quantiles exist precisely for skewed/heavy-tailed columns.
            - Therefore prefer empirical percentile bands of the array (e.g., the 0.135th–99.865th points) over μ ± 3σ as the default.
            - If μ ± kσ is used anyway, measure σ with a robust spread (MAD or IQR/1.349 of the array), not the raw sd.
-        - **The correctly stated rule.**
+         - **The correctly stated rule.**
            - Baseline: build the window-quantile array; get center + spread (or an empirical percentile band).
            - Pre-commit k = 3 and the run rule.
            - Observation: compare each current window quantile to the band.
            - p95 rising above UCL → tail growth / outlier injection; p5 dropping below LCL → lower-tail event; p50 → band on both sides.
            - Fire when ≥ 3 consecutive windows sit on the same side of the band.
-        - **Math justification — Ingredient 1 (the order-statistic CLT).**
+         - **Math justification — Ingredient 1 (the order-statistic CLT).**
            - The mean's row-CLT does not apply here; normality of each window quantile comes from the binomial CLT at the crossing.
            - The count $N(x) \sim \mathrm{Binomial}(K, p)$ at the quantile is normal for large $K\cdot\min(p, 1-p)$.
            - The inverse-CDF slope $1/f(q_p)$ converts that probability-scale noise into value-scale noise.
@@ -979,43 +988,39 @@ flowchart TB
            - This is the source of the $c_p/\sqrt K$ law that sized K and of the ≈normal shape of each window estimate.
            - Conditions: continuous data with $f(q_p) > 0$ — ties/discreteness break it (the median fold's Step-6 caveats).
            - The other two ingredients are unchanged: the band-spread is a normal *model* of drift, and the run rule is independence/combinatorics.
-     </details>
-   - **missingness rate**
-     <details>
-     <summary><strong>missingness rate — the thresholds for the current window, and why</strong></summary>
+         </details>
+      - **missingness rate**
+         <details>
+         <summary><strong>missingness rate — the thresholds for the current window, and why</strong></summary>
 
-        - **The reference object — the baseline rate $\hat p_0$.**
+         - **The reference object — the baseline rate $\hat p_0$.**
            - $\hat p_0$ is estimated from the baseline: pooled (total missing ÷ total rows) or the mean of the per-window array — the Collect-baseline fold.
            - It is the anchor every current window is compared against.
-        - **The threshold — multiplicative, not a μ ± k·σ band.**
+         - **The threshold — multiplicative, not a μ ± k·σ band.**
            - Rule: alert when $\hat p_{\mathrm{current}} > 10\times \hat p_0$ (module default factor 10).
            - Why not μ ± k·σ: missingness is a rare proportion, so absolute errors are meaningless and scale-dependent.
            - $\hat p$ is lattice-valued ($0, 1/K, 2/K, \ldots$), so a symmetric band around $\hat p_0$ misbehaves when $\hat p_0$ is small.
            - The 10× ratio is scale-free: it means the same thing whether $\hat p_0 = 0.01\%$ or $5\%$.
-        - **The per-window noise / K-comparability.**
+         - **The per-window noise / K-comparability.**
            - Each current window's $\hat p$ carries sampling noise $\sqrt{\hat p_0(1-\hat p_0)/K_{\mathrm{current}}}$, and K varies with volume.
            - Compare current and baseline windows only at similar K (same-slice / similar-volume), else the noise layers differ.
            - Empty windows ($K = 0$) give no $\hat p$ at all.
-        - **Detection resolution — what the 10× rule can and cannot catch.**
+         - **Detection resolution — what the 10× rule can and cannot catch.**
            - A genuine jump to *exactly* 10× lands on the threshold → only ≈ 50% detection per window.
            - Reliable detection needs overshoot or a larger Kp: at $Kp \approx 10$, ≈ 12× is caught with ≈ 73% and ≈ 15× with ≈ 93% per window.
            - This is exactly why the Collect fold sized windows to $Kp \approx 10\text{–}25$.
-        - **The run rule.**
+         - **The run rule.**
            - Fire only when ≥ 3 *consecutive* windows exceed $10 \times \hat p_0$ — the same same-side run discipline as the mean and median folds.
-        - **Direction semantics + floor.**
+         - **Direction semantics + floor.**
            - Rate rising ≫10× = upstream stopped populating the field → fix upstream.
            - Rate collapsing toward ~0 = the field is now always filled → verify it is benign.
            - Guard $\hat p_0 = 0$: floor the rule at $\max(10\,\hat p_0,\ \text{absolute floor})$ — otherwise the first missing row alarms forever.
-        - **False-alarm multiplicity.**
+         - **False-alarm multiplicity.**
            - Many columns × many windows per day compound the per-comparison false-alarm rate — budget it (e.g., tighten the run rule or require a stricter per-comparison rate) when alerting on many columns.
-        - **Math justification — the comparison's noise layer.**
+         - **Math justification — the comparison's noise layer.**
            - The comparison is valid only where the binomial CLT holds for each $\hat p$: $Kp$ and $K(1-p)$ ≳ 5–10.
            - The ratio's resolvability is set by the relative noise $\approx 1/\sqrt{Kp}$ derived in the Collect fold — the threshold layer inherits its resolution from the K-sizing layer.
-     </details>
-   - *Point statistic:* alert if the current value is outside **μ ± k·σ** (k = 3) for ≥ 3 consecutive windows.
-   - *Distribution (rigorous):* **PSI** (population stability index) compares the current window's distribution to the baseline, binned: `PSI = Σ (aᵢ − eᵢ)·ln(aᵢ/eᵢ)` over bins. **< 0.1 fine; 0.1–0.25 investigate; > 0.25 drift.**
-   - *Cardinality:* alert if (current distinct count ÷ baseline distinct count) > 2 (vocabulary grew) or → 1 (column went constant = feed broke).
-   - *Missingness:* alert if the missing rate exceeds 10× the baseline rate.
+         </details>
 5. Apply the same seasonality fix (per time-slice baseline).
 
    - **Sizing the statistic window — rows per window (K) each statistic needs** for a chosen tolerance (δ = the tolerance, σ = value-level sd, p = share/rate; σ and μ are population parameters, replaced by their baseline estimates in practice):
