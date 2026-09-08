@@ -2,6 +2,28 @@
 
 > **Core question:** How do we catch bad data before it poisons a model?
 
+**Table of contents**
+
+- [The transaction feed that changed silently](#the-transaction-feed-that-changed-silently)
+- [Data has a contract, whether you write it down or not](#data-has-a-contract-whether-you-write-it-down-or-not)
+- [Schema validation: the contract, made executable](#schema-validation-the-contract-made-executable)
+- [Quality gates: validation in the pipeline](#quality-gates-validation-in-the-pipeline)
+- [Drift at ingestion & anomaly detection](#drift-at-ingestion--anomaly-detection)
+  - [Volume and arrival rate](#volume-and-arrival-rate)
+    - [Deriving the baseline and thresholds.](#deriving-the-baseline-and-thresholds)
+    - [Hyperparameter dependency graph](#hyperparameter-dependency-graph)
+    - [The judgment runbook.](#the-judgment-runbook)
+    - [Re-baselining after a permanent level shift.](#re-baselining-after-a-permanent-level-shift)
+  - [Per-column statistics](#per-column-statistics)
+    - [Deriving the baseline and thresholds.](#deriving-the-baseline-and-thresholds-1)
+    - [Re-baselining per-column baselines (after a confirmed permanent change)](#re-baselining-per-column-baselines-after-a-confirmed-permanent-change)
+  - [Rare-value and new-value detection](#rare-value-and-new-value-detection)
+  - [Bonferroni correction (many simultaneous tests)](#bonferroni-correction-many-simultaneous-tests)
+- [Data documentation & lineage](#data-documentation--lineage)
+- [Monitoring data quality as a first-class concern](#monitoring-data-quality-as-a-first-class-concern)
+- [Design exercise](#design-exercise)
+- [Appendix: Why the ingestion stream is a Gamma–Poisson mixture](#appendix-why-the-ingestion-stream-is-a-gammapoisson-mixture)
+
 ---
 
 ## The transaction feed that changed silently
@@ -566,7 +588,7 @@ flowchart TB
 
 ---
 
-#### Re-baselining after a permanent level shift.** 
+#### Re-baselining after a permanent level shift.
 - The core principle: **never re-baseline on volume alone** — a genuine level shift and a disguised raid (bot raid causing higher-than-usual event-volume) look identical on the volume meter (both are "sustained high"). 
 - The discriminator is a *second signal*: genuine growth preserves *composition*; a raid distorts it.
 
@@ -745,7 +767,39 @@ flowchart TB
 #### Deriving the baseline and thresholds.
 1. Choose the statistic per column, by type. Document this once.
    - numeric → mean, median, standard deviation, p5/p50/p95, missingness rate
-   - categorical → cardinality, top-k frequencies, missingness rate (no. of missing rows for this column to total no. of rows in this window)
+   - categorical → cardinality, top-k share, top-k set overlap (Jaccard), missingness rate (no. of missing rows for this column to total no. of rows in this window), PSI over category bins
+
+   - **Sizing the statistic window — rows per window (K) each statistic needs** for a chosen tolerance (δ = the tolerance, σ = value-level sd, p = share/rate; σ and μ are population parameters, replaced by their baseline estimates in practice):
+
+     | statistic (col type) | SE of window stat | K_needed | what drives it |
+     |---|---|---|---|
+     | mean (num) | σ/√K | (CV/δ_rel)² | CV = σ/μ |
+     | median / pX (num) | σ·c_p/√K (median 1.25 · p25/p75 1.36 · p90 1.71 · p5/p95 2.11) | (c_p/δ_abs)² | density at quantile |
+     | std dev (num) | σ/√(2K) | 1/(2δ²) [×(β₂−1)/2] | kurtosis, not μ |
+     | missing rate (num+cat) | √(p(1−p)/K) | ≈1/(p·δ_rel²) | expected missing count Kp |
+     | top-k share (cat) | √(P(1−P)/K) | P(1−P)/δ_abs² | dominance of top mass |
+     | cardinality (cat) | — (rarefaction) | K ≥ ln(α)/ln(1−p) | rare-value visibility |
+
+- **Baseline period formation itself** — the known-good stretch length is fixed *before* "Collect the baseline", never after it:
+  <details>
+  <summary><strong>how the baseline period is set before collection — and why there is no circularity</strong></summary>
+
+     - the order is gauge → collect: a provisional exploratory pass (not the baseline) stabilizes the vocabulary and freezes $K$; $K$ plus the window-count budget ($n_{\mathrm{win}} \gtrsim 100$ per slice) fixes the baseline length in rows; dividing by the row rate $r$ gives the calendar length — all before any baseline exists
+     - after collection there is only verification, not re-gauging: re-check that observed shares still match the frozen $p_{\min}$ (if they moved, revisit $K$)
+     - **Cardinality — the period-gauging sequence** (cold start → frozen baseline length):
+       <details>
+       <summary><strong>cardinality — warm-up, freeze K, gauge the period, then collect</strong></summary>
+
+          - warm-up: run a provisional pass in ≈100-row buckets, counting brand-new values per bucket, until that count is small (≤ ≈1% of rows) and flat over the last ≈20 buckets — the vocabulary has stabilized
+          - realize shares from the register; commit the share floor $p_{\min}$ (a budget, like $\delta$); the must-see set = categories above the floor, the rest fold into "other"
+          - freeze [$K \ge \frac{\ln(\alpha)}{\ln(1-p_{\min})}$](#cardinality-k-formula) — rows per window, now a constant
+          - gauge the period: [$n_{\mathrm{win}} \gtrsim 100$](#cardinality-reference) windows per slice × $K$ rows ÷ row rate $r$ = the calendar length
+          - collect the formal baseline (the next step) as one contiguous known-good stretch of exactly that length
+          - verify afterward: observed shares still match the frozen $p_{\min}$ — if not, revisit $K$ (verification, not re-gauging)
+       </details>
+
+  </details>
+
 2. Collect the baseline: compute the statistic per window over the known-good period — you get a *distribution of the statistic* (e.g., 60 daily means of `amount`).
    - **The common algorithm behind every per-window statistic — four steps (the chain of thought; per-stat answers follow below).** Every statistic's window-size logic ($K$) is the same four-step sequence:
       - **Step 1 — choose the empirical estimator.** Pick the window statistic: the empirical quantity computed from the window's $K$ rows that estimates the statistic's own *population-level value*.
@@ -914,6 +968,84 @@ flowchart TB
            - $\text{alert if } \hat p_{\text{current}} > 10\times \hat p_0 \ \ (\ge 3 \text{ consecutive windows})$.
            - Direction semantics: rate rising ≫10× = upstream stopped populating the field (fix upstream); rate collapsing toward ~0 = a previously-optional field is now always filled (behavior change — verify it is benign).
         - **Step 5 — seasonality.** Same per-slice fix: baseline and current rates are compared within the same (day × hour) slice, so daily missingness rhythms (e.g., an overnight batch omitting a field) don't masquerade as drift.
+     </details>
+   - **Cardinality (distinct count)**
+     <details>
+     <summary><strong>cardinality — collecting the baseline over windows</strong></summary>
+
+        - Per window: count distinct values $D = \#\{\text{distinct values in the window}\}$
+        - Window width: $K$ above the visibility floor
+           - <a id="cardinality-k-formula"></a>$K \ge \frac{\ln(\alpha)}{\ln(1-p_{\min})}$, where $p_{\min} = \min_v p_v = \min_v \frac{N_v}{N_e}$
+              - $p_v = N_v/N_e$: baseline rows with category $v$ ÷ total baseline rows
+              - the min is over the categories you must see (the binding one)
+              - categories below the floor (infeasible $K$) go to "other"
+           - same-$K$ / same-slice windows only
+        - Why: $D$ grows with $K$ (rarefaction), not only with a changed mix
+           - larger $K$ alone ⇒ larger $D$ (pure artifact)
+        - Baseline result: array $\{D_1,\dots,D_{n_{\mathrm{win}}}\}$
+           - describe: center + spread
+        - Skip windows with tiny $K$
+           - they under-report vocabulary (lattice)
+     </details>
+   - **Top-k share**
+     <details>
+     <summary><strong>top-k share — collecting the baseline over windows</strong></summary>
+
+        - Fix $k$ once
+           - top-$k$ set defined by the baseline shares (fixed set)
+        - Per window: cumulative share of the fixed top-$k$ set
+           - $s = \frac{\text{window count inside top-}k}{K}$
+        - Binning rule: expected count ≥ 5 per top category (baseline)
+        - Baseline result: reference share
+           - mean of window shares, or pooled share
+        - Caution: the *observed* top-$k$ is upward-biased
+           - prefer the fixed baseline-defined set over the window-picked set
+     </details>
+   - **Top-k set overlap (Jaccard)**
+     <details>
+     <summary><strong>top-k set overlap — collecting the baseline over windows</strong></summary>
+
+        - Define the active set
+           - top-$k$, or categories with share ≥ $p_{\min}$ (pre-committed)
+        - Pooled baseline → reference active set $A$
+        - Per baseline window: overlap with $A$
+           - $J = \frac{|A \cap B|}{|A \cup B|}$, $B$ = window active set
+        - Baseline result: distribution of healthy self-overlap $J$
+           - later threshold = low percentile of that distribution
+        - Boundary categories need enough $K$
+           - visibility discipline; same-$K$ windows
+     </details>
+   - **Missingness rate (categorical column)**
+     <details>
+     <summary><strong>missingness rate (categorical column) — collecting the baseline</strong></summary>
+
+        - Define "missing" for the column
+           - NULL plus chosen sentinels ($""$, $N/A$, …)
+           - "Unknown" counts only if the modeling decision says so
+        - Per window: rate $\hat p = X/K$
+           - $X$ = missing rows in the window; $K$ = rows in the window
+        - Window width: expected missing count
+           - $Kp \approx 10\text{–}25$ (same sizing as the numeric side)
+        - Baseline result: pooled $\hat p_0$
+           - or mean of the per-window rates
+        - Caveats
+           - tiny $K$ ⇒ lattice $\hat p \in \{0, 1/K, \dots\}$
+           - $\hat p_0 = 0$ ⇒ floor the rule later
+     </details>
+   - **PSI over category bins**
+     <details>
+     <summary><strong>PSI over category bins — collecting the baseline</strong></summary>
+
+        - Fix category bins once
+           - top categories + "other"
+           - expected count ≥ 5 per bin
+        - Pool baseline rows → expected shares $e_b$
+           - the reference profile for every PSI
+        - Optional: per-window self-PSI array
+           - PSI(window vs pooled profile) over the known-good period
+           - calibrates the threshold later (healthy noise floor)
+        - Edge: bins are frozen
+           - new categories have no bin ($e_b = 0$) → the vocabulary register handles them
      </details>
 3. Describe it: its mean μ and standard deviation σ (or empirical percentiles).
 4. Set thresholds:
@@ -1102,6 +1234,32 @@ flowchart TB
                RUN --> ALERT
            ```
          </details>
+      - **cardinality (distinct count)**
+         <details>
+         <summary><strong>cardinality — the alert rule for the observation period</strong></summary>
+
+         - **The reference object.**
+            - Baseline array $\{D_1, \dots, D_{n_{\mathrm{win}}}\}$ (same-$K$ / same-slice; from the Collect fold)
+            - <a id="cardinality-reference"></a>$D_{\mathrm{ref}} = \mathrm{median}(D_i)$ — the healthy center
+            - $D_{p_1}$, $D_{p_{99}}$ = 1st / 99th percentiles of the array (needs $n_{\mathrm{win}} \gtrsim 100$)
+         - **The band — relative to the healthy center.**
+            - lower $= D_{p_1}/D_{\mathrm{ref}}$, upper $= D_{p_{99}}/D_{\mathrm{ref}}$
+            - current ratio $r_{\mathrm{cur}} = D_{\mathrm{cur}}/D_{\mathrm{ref}}$
+            - candidate: $r_{\mathrm{cur}} <$ lower (collapse) or $r_{\mathrm{cur}} >$ upper (growth)
+            - equivalence: raw band $[D_{p_1},\, D_{p_{99}}]$ on $D_{\mathrm{cur}}$ is identical ($D_{\mathrm{ref}}$ constant)
+         - **Run rule.**
+            - two counters: below-band and above-band (never merged)
+            - fire when ≥ 3 consecutive windows on the same side
+            - an in-band window resets that counter
+         - **Direction semantics.**
+            - above upper: vocabulary grew (new values — world changed or junk)
+            - below lower: vocabulary collapsing toward 1 → column went constant (upstream stopped varying)
+         - **Fallback (calibration infeasible).**
+            - $n_{\mathrm{win}}$ too small ⇒ $p_1/p_{99}$ collapse to min/max of the array
+            - widen: MAD-based band, or the 2× heuristic (growth) / ≈1 floor (constancy)
+         - **Comparability precondition.**
+            - same-$K$ / same-slice windows; skip insufficient-volume windows (below the visibility floor)
+         </details>
    - *Distribution (rigorous):* **PSI** (population stability index) — the value-distribution drift rule: compares the current period's binned value shares against the baseline profile.
      <details>
      <summary><strong>PSI — why the alert rule is χ²-based, derived step by step</strong></summary>
@@ -1199,17 +1357,6 @@ flowchart TB
      </details>
 5. Apply the same seasonality fix (per time-slice baseline).
 
-   - **Sizing the statistic window — rows per window (K) each statistic needs** for a chosen tolerance (δ = the tolerance, σ = value-level sd, p = share/rate; σ and μ are population parameters, replaced by their baseline estimates in practice):
-
-     | statistic (col type) | SE of window stat | K_needed | what drives it |
-     |---|---|---|---|
-     | mean (num) | σ/√K | (CV/δ_rel)² | CV = σ/μ |
-     | median / p95 (num) | σ·c_p/√K (1.25 / 2.11) | (c_p/δ_abs)² | density at quantile |
-     | std dev (num) | σ/√(2K) | 1/(2δ²) [×(β₂−1)/2] | kurtosis, not μ |
-     | missing rate (num+cat) | √(p(1−p)/K) | ≈1/(p·δ_rel²) | expected missing count Kp |
-     | top-k share (cat) | √(P(1−P)/K) | P(1−P)/δ_abs² | dominance of top mass |
-     | cardinality (cat) | — (rarefaction) | K ≥ ln(1/α)/p | rare-value visibility |
-
 **The judgment runbook.**
 1. Which column, which statistic, which direction.
 2. Bulk vs. tail: a mean shift = the whole distribution moved (new product, units change); a p95 shift with a flat mean = outliers/injection.
@@ -1218,6 +1365,197 @@ flowchart TB
 5. Re-baseline (legit change) or fix the feed (corrupt).
 
 **Worked example.** `amount` mean = 45.2 ± 2.1 for 8 weeks; one week it's 89.3 (≈ 21×σ), PSI = 0.41. Raw rows show every amount doubled → the upstream switched from local currency to cents (a *units* change, invisible to a type check). Fix upstream, don't retrain.
+
+---
+
+#### Re-baselining per-column baselines (after a confirmed permanent change)
+
+- **mean (numeric column)**
+  <details>
+  <summary><strong>mean — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: ≥ 3 consecutive window means on the same side of the band ($\mu_{\mathrm{stat}} \pm k\,\sigma_{\mathrm{stat}}$)
+        - confirm permanent: the same four checks as the volume battery, run on the *window-mean series* (slice uniformity → noise invariance → early-vs-late stationarity → level significance through H)
+        - read the raw rows: a genuine level change (units, real growth, a redefined field) → re-baseline; corruption (misparse, nulling) → fix the feed
+        - a FAIL on stationarity inside the "known-good" stretch means the stretch itself is wrong → re-baseline to an earlier window, not a later one
+     - **How to re-baseline.**
+        - pick a new known-good stretch (contiguous, externally healthy), same K / same slice
+        - re-collect the window-mean array $\{\bar x_1, \dots, \bar x_{n_{\mathrm{win}}}\}$ and recompute $\mu_{\mathrm{stat}}$, $\sigma_{\mathrm{stat}}$
+        - re-commit k and the run rule (unchanged, unless the re-derivation changed K)
+        - log old → new ($\mu_{\mathrm{stat}}$, $\sigma_{\mathrm{stat}}$), cause, timestamp; archive the old pair
+  </details>
+
+- **median / percentile (pX) (numeric column)**
+  <details>
+  <summary><strong>median / pX — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: ≥ 3 consecutive window pX values on the same side of the pX band — a p90/p95 move with a flat mean is a tail-regime change, not a level change
+        - confirm permanent re-baselining with the four checks on the window-pX series; read raw rows to tell a real quantile shift from a parse artifact
+        - quantile non-stationarity inside the known-good stretch → re-baseline the stretch earlier
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - re-collect the window-pX array; recompute its center and spread (or empirical band)
+        - re-commit the band (k, or percentile pair) and the run rule
+        - log old → new reference, cause, timestamp
+  </details>
+
+- **standard deviation (numeric column)**
+  <details>
+  <summary><strong>standard deviation — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: ≥ 3 consecutive window s.d.s on the same side of the spread band while the location stayed put — a variance-regime shift (dual-mode data, rounding-width change, a new mix of sources)
+        - confirm permanent re-baselining with the four checks on the window-s.d. series; a spread move is not the same event as a mean move — check which one actually changed
+        - if the tails changed materially, re-check the kurtosis row ($\beta_2$) before trusting the same K
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - re-collect the window-s.d. array; recompute the reference (center/spread or empirical band)
+        - re-derive K from the new spread only if the noise regime changed ($1/(2\delta^2)$ scaling)
+        - re-commit the band and run rule; log old → new, cause, timestamp
+  </details>
+
+- **missingness rate (numeric column)**
+  <details>
+  <summary><strong>missingness rate — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: sustained rate outside its band — rising ≫ 10× means the upstream stopped populating the field; collapsing toward ~0 means a previously-optional field is now always filled
+        - compare the same slice (seasonality fix) and confirm the change is permanent, not a transient null burst
+        - correlate with the volume check: rate moves are volume-independent — a missingness spike with a volume drop points at the feed, not at the column
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - recompute $\hat p_0$ (pooled) and re-derive the threshold at the same K (expected missing count $K\hat p_0 \ge 10$); floor the rule if $\hat p_0 \to 0$
+        - re-commit the band/run rule; log old → new ($\hat p_0$, thresholds), cause, timestamp
+  </details>
+
+- **cardinality (distinct count) (categorical column)**
+  <details>
+  <summary><strong>cardinality — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: ≥ 3 consecutive windows on the same side of the band around $D_{\mathrm{ref}}$ 
+          - growth = the vocabulary genuinely widened; 
+          - collapse toward 1 = the column went constant
+        - **Order — the cheap veto before the expensive wait.** Gate 2 (real vs junk: read the values) answers in minutes and can veto alone — junk is never re-baselined, however long it persists. \
+         Gate 1 (permanent vs transient) costs the whole confirmation horizon $H$ and can never approve alone — a settled plateau of junk still fails Gate 2. \
+         So the order is fixed: Gate 2 first; only a "plausible" verdict starts the $H$ clock that Gate 1 needs.
+        - **Gate 2 — real new categories, or junk?** Decided at $t_0$, in minutes, from the raw rows — the alert rule cannot tell, because the band only sees "D is high", never the values behind it.
+          - sample the new distinct values the baseline never had
+          - classify each candidate value:
+            - junk: opaque tokens, a misparse, a leaked internal-ID field, a type/units change (e.g. MCC arriving as free text)
+            - plausible: in-domain (valid MCC codes), carries real traffic share, repeats window after window
+          - act on the verdict:
+            - junk ⇒ fix the feed — no $H$, no checks, no re-baseline (permanence does not rescue junk)
+            - plausible ⇒ start the $H$ clock at $t_0$ and proceed to Gate 1
+          - re-run this read at $t_0 + H$: some corruptions only surface on a cross-field check (a valid-looking code attached to the wrong merchant)
+        - **Gate 1 — permanent, or a transient?** Confirmed at $t_0 + H$ on the candidate window $[t_0,\, t_0+H)$, transition (debut) windows excluded, on the window-$D$ series:
+          - (d) the alarm stayed live against the old baseline through all of $H$
+          - (c) early-vs-late stationarity — is the rise a settled step, a pulse that will revert, or a ramp still climbing? The mechanics, step by step:
+            - the input: the candidate window-$D$ series $\{D_1, \dots, D_{n_{\mathrm{cand}}}\}$ — one $D$ per K-window over $[t_0, t_0+H)$, same-K / same-slice, transition (debut) windows excluded
+            - the split: cut the series into three consecutive blocks of $n_{\mathrm{cand}}/3$ windows each
+            - the one comparability trap: never pool a whole block into a single distinct count — pooling raises the row pool and inflates $D$ by rarefaction, breaking comparability with $D_{\mathrm{ref}}$ (built on K-windows); each window keeps its own $D$
+            - the per-block summary: $\bar D_1, \bar D_2, \bar D_3$ = mean of the per-window $D$ values inside each block
+            - why the mean, not the median, for each block summary (and where the median does belong):
+              - the CLT here runs over the *window index*, not over rows: each window supplies one draw $D_j$ of the window-$D$ series, so a block mean $\bar D_k$ is the average of $n_k = n_{\mathrm{cand}}/3$ i.i.d. draws
+              - how the CLT applies, exactly: $\bar D_k \approx N(\mu_D,\ \sigma_D^2/n_k)$, with error rate $1/\sqrt{n_k}$ (Berry-Esseen: $\sup_x |F-\Phi| \le 0.4748\,\rho_3/\sqrt{n_k}$); under "the two thirds sit at the same level", $\bar D_1 - \bar D_3$ has mean 0 and sd $\sigma_D\sqrt{1/n_1+1/n_3}$ — that spread is the null that "flat" is judged against
+                - here $\mu_D$ and $\sigma_D$ are the between-window mean and sd of the window-$D$ series itself (its $\mu_{\mathrm{stat}}$, $\sigma_{\mathrm{stat}}$) — not $D_{\mathrm{ref}}$ and not the $p_1/p_{99}$ band, which are the robust reference built from that same array
+              - the mean is *not* swayed by extreme row values here — rows are already averaged away inside each window (a window statistic is a mean-like functional of its $K$ rows); the only thing that can sway a block mean is an extreme *window*, and that is signal, not noise: a junk window minting thousands of *unique* values (the literal definition of $D$) inside an otherwise flat third is the transient the shape check must expose — the mean flags it ("not flat"), a median would hide it (one window cannot move the median of $n_k$ values)
+              - the window-$D$ series needs no heavy-tail gate — there is no "switch the block summary to the median" branch here:
+                - $D \le K$ is bounded, so the window-$D$ variance is always finite — $\sigma_D$ always exists
+                - hence the block-mean CLT is always valid (Lindeberg–Lévy needs only finite variance): skew can dull the test, never void it
+                - what a spike window needs is not a robust summary but exclusion: the mean flags it ("not flat") → investigate → drop it before the new array is collected
+                - the robust layer stays where it already is: $D_{\mathrm{ref}} = \mathrm{median}(D_i)$ keeps the center safe against a residual minority spike; the $p_1/p_{99}$ band is only as clean as that exclusion step (a spike left inside inflates it — the worked contrast below)
+                - the "$\alpha \le 2$ → switch to median/pX" gate is a numeric mean-vs-median decision on the column row law — it does not apply to the window-$D$ series
+              - worked contrast (21 windows; say 20 of them have $D_i$ ≈ 90, plus one junk window of ≈ 5,000 inside the first third):
+                - mean: $\bar D_1 \approx (19\cdot 90 + 5000)/20 \approx 335$, while $\bar D_2 \approx \bar D_3 \approx 90$ → "not flat" → inspect → the spike window is found and excluded from the new stretch
+                - median: $\bar D_1 = 90$ like the other thirds → "flat" → re-baseline with the spike window inside the new array → its band percentiles widen, and later real growth up to ≈ 1,000 never alerts
+            - the readings:
+              - flat plateau: $\bar D_1 \approx \bar D_2 \approx \bar D_3$, all ≠ $D_{\mathrm{ref}}$ (above the band) → a finite set that has fully debuted → settled step → (c) passes, i.e. *early vs late stationarity votes for re-baselining*.
+                - "above the band": the relative form the alert actually uses: the ratio $r = D/D_{\mathrm{ref}}$ vs the pre-committed edges $D_{p_1}/D_{\mathrm{ref}}$ (low) and $D_{p_{99}}/D_{\mathrm{ref}}$ (high); (c) sets no new distance of its own:
+                - healthy windows sit inside the band by construction — only ≈ 1% of them exceed $D_{p_{99}}$ (growth side) or fall below $D_{p_1}$ (collapse side)
+                - concerning = *beyond the edge*, not a magnitude: a plateau at 90 and one at 400 are both "above $D_{p_{99}}$"; how far past the edge never changes the verdict
+                - worked: $D_{\mathrm{ref}}$ = 60, $D_{p_{99}}$ = 72 → upper ratio = 72/60 = 1.2 — a window at 75 (+25%) is already beyond the edge, and the plateau at ≈ 90 (+50%) sits deep outside it
+                - (c) then adds only stability, not distance: block means ≈ equal to each other *and* all beyond the edge, held flat through $H$
+              - pulse: $\bar D_1$ high, $\bar D_3$ drifting back toward $D_{\mathrm{ref}}$ → the extra values stopped appearing (bot raid, campaign) → transient → (c) fails → hold
+              - ramp: $\bar D_1 < \bar D_2 < \bar D_3$, no reversion → the vocabulary is still growing (unique-token leak, discovery incomplete) → not settled → (c) fails → defer
+            - worked illustration ($D_{\mathrm{ref}}$ = 60, band upper = 72, $n_{\mathrm{cand}}$ = 60 windows → blocks of 20):
+              - flat: block means ≈ 90.0 / 90.2 / 90.1 → flat at ≈ 90, all above the band → (c) passes
+              - pulse: block means ≈ 320 / 150 / 60.5 → late third back inside the old band → transient
+              - ramp: block means ≈ 120 / 260 / 540 → still climbing → not settled
+            - the sharper instrument (means alone can hide a slow debut): the late-third rate of *previously-unseen* values — ≈ 0 means the vocabulary stopped growing; ≫ 0 means it is still minting new values
+          - (b) noise invariance: $D$'s window-to-window scatter at the new level matches a stable vocabulary of that size — the column is not still discovering values
+          - all pass ⇒ re-baseline: re-collect a known-good stretch, recompute $D_{\mathrm{ref}}$ and the band percentiles, re-commit the run rule, log old → new
+          - any fail ⇒ no re-baseline: keep the old baseline live; fix the feed if the $t_0 + H$ Gate-2 re-read found junk
+        - new values above the observation share are still a separate rare/new-value alert — re-baselining $D$ does not re-admit them
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice (above the visibility floor)
+        - re-collect the $\{D_1, \dots, D_{n_{\mathrm{win}}}\}$ array; recompute $D_{\mathrm{ref}} = \mathrm{median}(D_i)$ and the band percentiles ($p_1/p_{99}$, needs $n_{\mathrm{win}} \gtrsim 100$) or the fallback
+        - re-freeze the "other" floor if category definitions changed
+        - re-commit the run rule; log old → new ($D_{\mathrm{ref}}$, band), cause, timestamp
+  </details>
+
+- **top-k share (categorical column)**
+  <details>
+  <summary><strong>top-k share — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: ≥ 3 consecutive windows with the fixed top-k set's cumulative share outside its band — concentration permanently rose (top mass dominates) or decayed (tail spread)
+        - confirm permanent (four checks on the window-share series); a rotated *membership* with a stable share is the Jaccard stat's event, not this one
+        - corrupt vs real: a top category being misparsed changes share without a real mix change — read raw rows first
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - re-collect the window-share series; recompute the reference share (mean of windows, or pooled)
+        - re-freeze the top-k set only if the business definition changed; a set rotation belongs to the Jaccard re-baseline
+        - re-commit the band and run rule; log old → new, cause, timestamp
+  </details>
+
+- **top-k set overlap, Jaccard (categorical column)**
+  <details>
+  <summary><strong>top-k set overlap (Jaccard) — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: sustained self-overlap $J$ below its healthy low percentile — the active set permanently rotated (categories churn in and out and the new set stabilizes)
+        - confirm permanent (four checks on the window-J series); exclude seasonal rotation by comparing the same slice
+        - a permanent rotation usually accompanies a share or PSI move — decide once, re-baseline the set, then let the other stats re-confirm
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - re-collect the overlap array; recompute the reference active set $A$ from the pooled new baseline (top-k, or share ≥ $p_{\min}$)
+        - recompute the low-percentile threshold from the new healthy self-overlap distribution
+        - re-commit the run rule; log old → new (active set, threshold), cause, timestamp
+  </details>
+
+- **missingness rate (categorical column)**
+  <details>
+  <summary><strong>missingness rate (categorical column) — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: sustained rate outside its band — rising = values stop arriving for this column; collapsing = the column is now always populated
+        - "missing" is defined per column (NULL + chosen sentinels; "Unknown" only if the modeling decision says so) — a change in that definition is a re-baseline event, not a drift event
+        - confirm permanent and same-slice before acting; correlate with the volume check to separate feed breaks from real behavior changes
+     - **How to re-baseline.**
+        - pick a new known-good stretch, same K / same slice
+        - re-freeze the missing-definition if it changed; recompute $\hat p_0$ and re-derive thresholds (expected missing count rule)
+        - re-commit the band/run rule; log old → new ($\hat p_0$, thresholds), cause, timestamp
+  </details>
+
+- **PSI — value distribution (numeric value bins / categorical category bins)**
+  <details>
+  <summary><strong>PSI — when to decide re-baselining, and how to re-baseline</strong></summary>
+
+     - **When to decide re-baselining.**
+        - candidate: $\chi^2_{\mathrm{obs}}$ (or $N_o\cdot$PSI, or the empirical self-PSI percentile) above threshold for ≥ 3 consecutive periods — the *whole distribution* moved, not just a point statistic
+        - confirm permanent: four checks on the period-level PSI series; compare same slice to kill seasonality; raw rows: a real mix change (new product, new segment, re-encoded values) vs corruption
+        - a units/scale change is a level event with a feed fix, not a distribution re-baseline — it shows up as mass piling into the outer bins
+        - baseline exactness: after a legit permanent change, $N_e \gg N_o$ no longer holds for the old profile → re-baseline restores it
+     - **How to re-baseline.**
+        - pick a new known-good stretch
+        - re-freeze the bins on the new stretch (baseline quantiles for numeric; category bins + "other" for categorical) — edges are frozen numbers again
+        - re-collect the baseline counts $E_b$, $N_e$, shares $e_b$; rebuild the self-PSI array to re-calibrate the healthy noise floor
+        - re-commit the threshold mode ($\chi^2_{B-1}(1-\alpha)$, or heuristic, or empirical percentile) and the run rule
+        - log old → new (bin edges, profile $e_b$, threshold), cause, timestamp
+  </details>
 
 ---
 
