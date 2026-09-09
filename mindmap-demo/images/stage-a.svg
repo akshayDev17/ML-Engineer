@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="190" font-family="Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrA" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#444"/></marker>
+  </defs>
+  <rect x="10" y="77" width="100" height="36" rx="6" fill="#e8f0fe" stroke="#4285f4"/>
+  <text x="60" y="99" text-anchor="middle" fill="#174ea6">Raw feed</text>
+  <line x1="110" y1="95" x2="150" y2="95" stroke="#444" marker-end="url(#arrA)"/>
+  <polygon points="150,66 225,95 150,124" fill="#fef7e0" stroke="#b06000"/>
+  <text x="187" y="99" text-anchor="middle" font-size="11">gate OK?</text>
+  <line x1="225" y1="95" x2="270" y2="95" stroke="#444" marker-end="url(#arrA)"/>
+  <text x="228" y="112" font-size="10">pass</text>
+  <rect x="270" y="77" width="110" height="36" rx="6" fill="#e6f4ea" stroke="#188038"/>
+  <text x="325" y="99" text-anchor="middle" fill="#0d652d">Warehouse</text>
+  <line x1="225" y1="95" x2="225" y2="30" stroke="#c5221f" marker-end="url(#arrA)"/>
+  <text x="232" y="42" fill="#c5221f" font-size="10">fail</text>
+  <rect x="160" y="8" width="130" height="22" rx="11" fill="#fce8e6" stroke="#c5221f"/>
+  <text x="225" y="23" text-anchor="middle" fill="#c5221f" font-size="11">Quarantine + alert</text>
+  <text x="280" y="175" fill="#666" font-size="11">stage A — ingestion gate (dummy UML-style SVG)</text>
+</svg>

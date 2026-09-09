@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="190" font-family="Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrB" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#444"/></marker>
+  </defs>
+  <rect x="10" y="77" width="110" height="36" rx="6" fill="#fce8e6" stroke="#c5221f"/>
+  <text x="65" y="99" text-anchor="middle" fill="#a50e0e">Failed row</text>
+  <line x1="120" y1="95" x2="160" y2="95" stroke="#444" marker-end="url(#arrB)"/>
+  <rect x="160" y="70" width="130" height="50" rx="6" fill="#fef7e0" stroke="#b06000"/>
+  <text x="225" y="92" text-anchor="middle">Quarantine store</text>
+  <text x="225" y="108" text-anchor="middle" font-size="10">(raw bytes kept)</text>
+  <line x1="290" y1="95" x2="330" y2="95" stroke="#444" marker-end="url(#arrB)"/>
+  <rect x="330" y="77" width="100" height="36" rx="6" fill="#e6f4ea" stroke="#188038"/>
+  <text x="380" y="99" text-anchor="middle" fill="#0d652d">Alert + page</text>
+  <rect x="160" y="140" width="200" height="26" rx="13" fill="#f1f3f4"/>
+  <text x="260" y="157" text-anchor="middle" fill="#444" font-size="11">nightly review -> re-feed or drop</text>
+  <line x1="225" y1="120" x2="225" y2="140" stroke="#666" stroke-dasharray="4 3" marker-end="url(#arrB)"/>
+  <text x="430" y="175" fill="#666" font-size="11">stage B — quarantine &amp; alert (dummy UML-style SVG)</text>
+</svg>

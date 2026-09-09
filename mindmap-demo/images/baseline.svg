@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="190" font-family="Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrC" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#444"/></marker>
+  </defs>
+  <rect x="10" y="77" width="120" height="36" rx="6" fill="#e8f0fe" stroke="#4285f4"/>
+  <text x="70" y="99" text-anchor="middle" fill="#174ea6">Stream windows</text>
+  <line x1="130" y1="95" x2="170" y2="95" stroke="#444" marker-end="url(#arrC)"/>
+  <rect x="170" y="60" width="160" height="70" rx="6" fill="#e6f4ea" stroke="#188038"/>
+  <text x="250" y="85" text-anchor="middle" fill="#0d652d">Baseline buffer</text>
+  <text x="250" y="101" text-anchor="middle" font-size="10">N days of windows</text>
+  <text x="250" y="115" text-anchor="middle" font-size="10">(e.g. 14 days, 1h windows)</text>
+  <line x1="330" y1="95" x2="370" y2="95" stroke="#444" marker-end="url(#arrC)"/>
+  <polygon points="370,66 445,95 370,124" fill="#fef7e0" stroke="#b06000"/>
+  <text x="407" y="99" text-anchor="middle" font-size="11">derive μ, σ</text>
+  <line x1="445" y1="95" x2="480" y2="95" stroke="#444" marker-end="url(#arrC)"/>
+  <rect x="480" y="77" width="70" height="36" rx="6" fill="#fce8e6" stroke="#c5221f"/>
+  <text x="515" y="99" text-anchor="middle" fill="#a50e0e" font-size="11">thresholds</text>
+  <text x="280" y="175" fill="#666" font-size="11">baseline collection (dummy UML-style SVG)</text>
+</svg>
