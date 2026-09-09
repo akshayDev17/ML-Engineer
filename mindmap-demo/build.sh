@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Regenerate the self-contained mind-map HTML from the Markdown source.
+# Regenerate demo-map.html from demo.md.
 #
-# 1) demo.md references images relatively (images/*.svg) so it stays readable
-#    and renders on GitHub's own Markdown preview.
-# 2) markmap cannot use data: URIs, so the build rewrites image references to
-#    absolute raw.githubusercontent.com URLs (works after you push to GitHub),
-#    then renders the map with markmap-cli into demo-map.html.
+# The output file is FULLY self-contained and works OFFLINE: d3, the markmap
+# viewer, the toolbar and every diagram SVG are baked into the single HTML
+# file (see build-offline.mjs for how diagrams become data: URIs in the tree).
 #
 # Usage:  bash mindmap-demo/build.sh      (from the repo root)
 set -euo pipefail
@@ -14,21 +12,13 @@ cd "$(dirname "$0")"
 # npm's global cache is broken (root-owned files); use a private cache here.
 export npm_config_cache="${npm_config_cache:-$(pwd)/.npm-cache}"
 
-REPO="${REPO:-akshayDev17/ML-Engineer}"
-BRANCH="${BRANCH:-main}"
-BASE="https://raw.githubusercontent.com/$REPO/$BRANCH/mindmap-demo"
+if [ ! -d build/deps/node_modules/markmap-lib ]; then
+  echo "Installing build dependencies (one-time)..."
+  mkdir -p build/deps
+  (cd build/deps && npm init -y >/dev/null 2>&1 && \
+    npm install --no-audit --no-fund \
+      d3@7.9.0 markmap-view@0.18.12 markmap-toolbar@0.18.12 markmap-lib@0.18.12)
+fi
 
-node -e '
-const { readFileSync, writeFileSync, mkdirSync } = require("node:fs");
-const base = process.argv[1];
-const md = readFileSync("demo.md", "utf8");
-const out = md.replace(/!\[([^\]]*)\]\((images\/[^)\s]+)\)/g, (m, alt, path) => {
-  return `![${alt}](${base}/${path})`;
-});
-mkdirSync("build", { recursive: true });
-writeFileSync("build/demo-embedded.md", out);
-console.log("Rewrote image refs to " + base + " -> build/demo-embedded.md");
-' "$BASE"
-
-npx --yes markmap-cli build/demo-embedded.md -o demo-map.html --no-open
-echo "Built: mindmap-demo/demo-map.html"
+node build-offline.mjs
+echo "Done. Open mindmap-demo/demo-map.html (works with no internet)."
