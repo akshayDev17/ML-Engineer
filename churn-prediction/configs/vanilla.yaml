@@ -1,0 +1,54 @@
+# VANILLA profile — the baseline answer to every requirement.
+# Each "advanced" deep-dive is swapped back to its plain counterpart:
+#   data.generator    random     (independent columns, label is a coin flip: no assumed pattern)
+#   imbalance         none       (natural prior, unweighted loss)
+#   tuning            fixed      (hand-picked hyper-parameters)
+#   threshold         fixed 0.5
+# Feature selection, cleaning, preprocessing, splitting, evaluation and packaging are core
+# requirements, so they are identical in both profiles.
+seed: 42
+device: cpu
+paths: {data_dir: data, artifacts_dir: artifacts}
+
+data:
+  generator: random
+  snapshot_date: "2026-09-30"
+  corruption_rate: 0.04
+
+split: {val_size: 0.15, test_size: 0.15}
+
+feature_selection:
+  strategy: hybrid
+  params:
+    hygiene: {max_missing_rate: 0.5, max_dominant_share: 0.98, redundancy_threshold: 0.85}
+    permutation: {n_splits: 5, n_repeats: 5, scoring: average_precision, stability_k: 1.0, min_features: 3}
+
+preprocessing: {scaler: standard, iqr_k: 3.0, skew_threshold: 1.0}
+
+imbalance:
+  strategy: none
+
+model:
+  architecture: {name: mlp, hidden_dims: [64, 32], dropout: 0.3, activation: relu, batch_norm: true}
+  training:
+    optimizer: adamw
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 256
+    max_epochs: 100
+    early_stopping_patience: 10
+    lr_scheduler_factor: 0.5
+    lr_scheduler_patience: 4
+    grad_clip_norm: 1.0
+    monitor: val_pr_auc
+
+tuning:
+  strategy: fixed
+
+threshold:
+  policy: fixed
+  params: {value: 0.5}
+
+serving:
+  model_name: churn-model
+  exporters: [state_dict, onnx]

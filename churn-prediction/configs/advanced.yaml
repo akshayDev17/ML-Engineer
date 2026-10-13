@@ -1,0 +1,62 @@
+# ADVANCED profile (default) — every follow-up deep-dive switched on.
+#   data.generator    pattern       data synthesised from an assumed causal pattern (notes/01)
+#   imbalance         class_weight  cost-sensitive BCE; alternatives: smotenc | weighted_sampler | random_undersample
+#   tuning            optuna        TPE sampler + median pruning on validation PR-AUC (notes/06)
+#   threshold         max_fbeta     F1-optimal cut chosen on validation; alternative: min_recall
+# Any single line can be flipped back to its vanilla value independently.
+seed: 42
+device: cpu
+paths: {data_dir: data, artifacts_dir: artifacts}
+
+data:
+  generator: pattern
+  snapshot_date: "2026-09-30"
+  corruption_rate: 0.04
+
+split: {val_size: 0.15, test_size: 0.15}
+
+feature_selection:
+  strategy: hybrid
+  params:
+    hygiene: {max_missing_rate: 0.5, max_dominant_share: 0.98, redundancy_threshold: 0.85}
+    permutation: {n_splits: 5, n_repeats: 5, scoring: average_precision, stability_k: 1.0, min_features: 3}
+
+preprocessing: {scaler: standard, iqr_k: 3.0, skew_threshold: 1.0}
+
+imbalance:
+  strategy: class_weight
+  params: {power: 1.0}
+  # strategy: smotenc
+  # params: {sampling_strategy: 0.5, k_neighbors: 5}
+
+model:
+  architecture: {name: mlp, hidden_dims: [64, 32], dropout: 0.3, activation: relu, batch_norm: true}
+  training:
+    optimizer: adamw
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 256
+    max_epochs: 100
+    early_stopping_patience: 10
+    lr_scheduler_factor: 0.5
+    lr_scheduler_patience: 4
+    grad_clip_norm: 1.0
+    monitor: val_pr_auc
+
+tuning:
+  strategy: optuna
+  params:
+    n_trials: 30
+    timeout_s: 900
+    max_epochs_per_trial: 40
+    n_startup_trials: 8
+    n_warmup_steps: 8
+    storage: null            # e.g. "sqlite:///artifacts/optuna.db" to make studies resumable
+
+threshold:
+  policy: max_fbeta
+  params: {beta: 1.0}
+
+serving:
+  model_name: churn-model
+  exporters: [state_dict, onnx]
