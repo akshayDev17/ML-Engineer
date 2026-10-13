@@ -7,7 +7,9 @@
 data/
 artifacts/
 
-# safety net: never commit datasets or model binaries even if a path setting changes
+# safety net: never commit datasets or model binaries even if a path setting changes.
+# Deliberate exception, added with `git add -f`: data/*.csv and artifacts/registry/churn-model/v1/model.onnx
+# (reference copy of the default run). Tracked files stay tracked despite these rules.
 *.csv
 *.onnx
 *.pt
