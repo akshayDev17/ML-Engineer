@@ -79,4 +79,4 @@ churn-prediction/
 └── tests/              config/CLI · data · features · modeling · end-to-end (incl. serving parity + HTTP)
 ```
 
-`data/` (raw, cleaned, and ground-truth CSVs) and `artifacts/` (the model registry) are generated and git-ignored.
+`data/` (raw, cleaned, and ground-truth CSVs) and `artifacts/` (the model registry) are generated and git-ignored. One reference copy is force-committed: the three CSVs in `data/` and `artifacts/registry/churn-model/v1/model.onnx`, i.e. the default `python -m churn` run (advanced profile) whose results are quoted above. Re-running the pipeline overwrites them locally; restore with `git checkout -- data artifacts`.
